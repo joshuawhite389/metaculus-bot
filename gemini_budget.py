@@ -2,32 +2,41 @@
 A hard daily cap on Gemini API calls, shared across GitHub Actions runs.
 
 The bot runs stateless every 20 minutes, and the Gemini key is shared with other projects, so the
-count of calls made today lives in a repository variable `GEMINI_USAGE` as JSON:
+count of calls made today lives in a small JSON file carried between runs by the Actions cache
+(`actions/cache/restore` before the bot, `actions/cache/save` after it, key prefix `gemini-usage-`):
     {"day": "2026-10-07", "calls": 42}
 `day` is the Pacific date, because Google's free-tier daily quotas reset at midnight Pacific.
+(A repository variable was the first design; GITHUB_TOKEN gets 403 on the variables API, 2026-10-07.)
+The env var GEMINI_USAGE, if set, overrides the file (manual reset or correction).
 
-Per run: read the variable (passed in as the GEMINI_USAGE env var by the workflow), allow at most
-`cap - calls` more calls, and at exit add this run's calls back to the variable through the GitHub
-REST API using the workflow's GITHUB_TOKEN (needs `permissions: actions: write`). The write re-reads
-the variable first so two overlapping runs don't lose each other's counts.
+Per run: read, allow at most `cap - calls` more calls, and at exit write `calls + this run` back to
+the file. Two overlapping runs can undercount each other by one run's calls; the cap is conservative.
 
-Pure helpers (parse/format/Budget) have no I/O: see tests/test_gemini_budget.py.
+Also here: a per-model sliding-window rate limiter (free tier has a low per-minute quota) and the
+budget object the bot's Gemini wrapper consults before every call.
+
+Pure helpers (parse/format/Budget/RateLimiter) have no I/O: see tests/test_gemini_budget.py.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
+from collections import deque
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
-
-import requests
 
 logger = logging.getLogger(__name__)
 
 VARIABLE_NAME = "GEMINI_USAGE"
+DEFAULT_USAGE_FILE = ".gemini-usage/usage.json"
 DEFAULT_DAILY_CAP = 300  # 60% of the lowest credible free-tier RPD (500) we found for Flash-Lite; override via GEMINI_DAILY_CAP
+DEFAULT_RPM = 8  # per model; free-tier Flash-Lite per-minute quota is ~10-15, and 429s cost retries
+MAX_CONSECUTIVE_RATE_LIMITS = 8  # after this many 429s in a row, assume the daily quota is gone and stop the run
 
 
 class GeminiBudgetExhausted(RuntimeError):
@@ -95,51 +104,82 @@ class Budget:
         )
 
 
+def usage_file(env=os.environ) -> Path:
+    return Path(env.get("GEMINI_USAGE_FILE") or DEFAULT_USAGE_FILE)
+
+
+def read_stored_usage(env=os.environ) -> str | None:
+    """The GEMINI_USAGE env var if set, else the cached file's contents, else None."""
+    if (env.get(VARIABLE_NAME) or "").strip():
+        return env[VARIABLE_NAME]
+    f = usage_file(env)
+    try:
+        return f.read_text() if f.exists() else None
+    except OSError as e:
+        logger.warning(f"Could not read {f}: {e}")
+        return None
+
+
 def budget_from_env(env=os.environ) -> Budget:
     today = pacific_today()
     cap = int(env.get("GEMINI_DAILY_CAP") or DEFAULT_DAILY_CAP)
-    return Budget(cap=cap, used_at_start=parse_usage(env.get(VARIABLE_NAME), today), today=today)
-
-
-# ----------------------------------------------------------------------------- GitHub variable I/O
-
-
-def _gh(env):
-    token = env.get("GITHUB_TOKEN")
-    repo = env.get("GITHUB_REPOSITORY")
-    if not token or not repo:
-        return None, None
-    return f"https://api.github.com/repos/{repo}/actions/variables", {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    return Budget(cap=cap, used_at_start=parse_usage(read_stored_usage(env), today), today=today)
 
 
 def record_usage(delta: int, env=os.environ) -> str | None:
-    """Add this run's calls to the shared variable. Returns the stored JSON, or None if it couldn't."""
-    if delta <= 0:
-        return None
-    base, headers = _gh(env)
-    if base is None:
-        logger.warning("GITHUB_TOKEN/GITHUB_REPOSITORY not set: Gemini usage not recorded (local run?)")
-        return None
+    """Add this run's calls to the cached file (re-read first). Returns the stored JSON, or None on failure."""
+    f = usage_file(env)
     today = pacific_today()
     try:
-        r = requests.get(f"{base}/{VARIABLE_NAME}", headers=headers, timeout=20)
-        if r.status_code == 404:
-            current, exists = 0, False
-        else:
-            r.raise_for_status()
-            current, exists = parse_usage(r.json().get("value"), today), True
-        value = format_usage(today, current + delta)
-        if exists:
-            w = requests.patch(f"{base}/{VARIABLE_NAME}", headers=headers, json={"name": VARIABLE_NAME, "value": value}, timeout=20)
-        else:
-            w = requests.post(base, headers=headers, json={"name": VARIABLE_NAME, "value": value}, timeout=20)
-        w.raise_for_status()
-        logger.info(f"Recorded Gemini usage: {value}")
+        current = 0
+        if f.exists():
+            current = parse_usage(f.read_text(), today)
+        value = format_usage(today, current + max(0, int(delta)))
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(value)
+        logger.info(f"Recorded Gemini usage in {f}: {value}")
         return value
     except Exception as e:  # never fail a run on bookkeeping; the cap is conservative
         logger.warning(f"Could not record Gemini usage ({type(e).__name__}: {str(e)[:200]})")
         return None
+
+
+class RateLimiter:
+    """Sliding window: at most `per_minute` acquisitions in any 60 s. Async-safe within one event loop."""
+
+    def __init__(self, per_minute: int, clock=time.monotonic, sleeper=asyncio.sleep):
+        self.per_minute = max(1, int(per_minute))
+        self._times: deque[float] = deque()
+        self._clock = clock
+        self._sleep = sleeper
+        self._lock: asyncio.Lock | None = None
+
+    def wait_needed(self, now: float) -> float:
+        while self._times and now - self._times[0] >= 60.0:
+            self._times.popleft()
+        if len(self._times) < self.per_minute:
+            return 0.0
+        return 60.0 - (now - self._times[0])
+
+    async def acquire(self) -> float:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            waited = 0.0
+            while True:
+                w = self.wait_needed(self._clock())
+                if w <= 0:
+                    break
+                waited += w
+                await self._sleep(w)
+            self._times.append(self._clock())
+            return waited
+
+
+_limiters: dict[str, RateLimiter] = {}
+
+
+def limiter_for(model: str, env=os.environ) -> RateLimiter:
+    if model not in _limiters:
+        _limiters[model] = RateLimiter(int(env.get("GEMINI_RPM") or DEFAULT_RPM))
+    return _limiters[model]

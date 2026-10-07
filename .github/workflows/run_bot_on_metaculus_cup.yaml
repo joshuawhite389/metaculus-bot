@@ -11,10 +11,8 @@ concurrency:
 
 
 # Daily job to run the simple forecast bot
-# actions: write lets the run update the GEMINI_USAGE repository variable (shared daily call cap).
 permissions:
   contents: read
-  actions: write
 
 jobs:
   forecast_job:
@@ -35,6 +33,14 @@ jobs:
           installer-parallel: true
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
+      # Gemini daily call counter (gigbot): a tiny JSON file carried between runs by the cache. The restore key
+      # never matches, so restore-keys picks the most recent `gemini-usage-*` entry; save always writes a new one.
+      - name: Restore Gemini usage counter
+        uses: actions/cache/restore@v4
+        with:
+          path: .gemini-usage
+          key: gemini-usage-${{ github.run_id }}
+          restore-keys: gemini-usage-
       - name: Run bot
         run: |
           poetry run python gigbot_bot.py --mode metaculus_cup
@@ -47,9 +53,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_USAGE: ${{ vars.GEMINI_USAGE }}
+          GEMINI_USAGE: ${{ vars.GEMINI_USAGE }} # optional manual override of the cached counter
           GEMINI_DAILY_CAP: ${{ vars.GEMINI_DAILY_CAP }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_RPM: ${{ vars.GEMINI_RPM }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
@@ -57,3 +63,9 @@ jobs:
           RESEARCHER_MODEL: ${{ vars.RESEARCHER_MODEL }}
           PARSER_MODEL: ${{ vars.PARSER_MODEL }}
           PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION }}
+      - name: Save Gemini usage counter
+        if: always() && hashFiles('.gemini-usage/usage.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .gemini-usage
+          key: gemini-usage-${{ github.run_id }}

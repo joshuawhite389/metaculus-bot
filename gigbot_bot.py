@@ -19,10 +19,11 @@ gigbot's FutureEval bot: the Metaculus template (main.py, FallTemplateBot2026) p
   questions, without calling any LLM or posting anything.
 - Interim Gemini mode (2026-10-07): with no OPENROUTER_API_KEY but a GEMINI_API_KEY, the defaults
   switch to free-tier Gemini Flash-Lite models, 3 forecasts per question, no web research (Google
-  Search grounding is not on the free tier), the binary probability parsed by regex first (parser
-  LLM only as fallback), and a hard daily cap on Gemini calls shared across runs through the
-  GEMINI_USAGE repository variable (gemini_budget.py). The OpenRouter ensemble takes over by itself
-  the moment OPENROUTER_API_KEY exists. Repository variables still override every model name.
+  Search grounding is not on the free tier), no research summary, the binary probability parsed by
+  regex first (parser LLM only as fallback), a per-model rate limiter, and a hard daily cap on
+  Gemini calls shared across runs through a cached usage file (gemini_budget.py). The OpenRouter
+  ensemble takes over by itself the moment OPENROUTER_API_KEY exists. Repository variables still
+  override every model name.
 
 Everything else (question fetching, numeric/multiple-choice/date handling, posting the private
 reasoning comment) is the template's, unchanged.
@@ -110,20 +111,37 @@ GEMINI_BUDGET = gemini_budget.budget_from_env()
 
 
 class GeminiLlm(GeneralLlm):
-    """GeneralLlm that counts every call against the shared daily Gemini cap and stops on a daily-quota 429."""
+    """
+    GeneralLlm that, per call: waits for the per-model rate limiter, counts the call against the shared
+    daily cap, and on 429s either stops the run (daily quota, or too many 429s in a row) or lets the
+    library's backoff retry (per-minute).
+    """
+
+    consecutive_rate_limits = 0  # class-wide, across models
 
     async def invoke(self, prompt, system_prompt=None):  # type: ignore[override]
         GEMINI_BUDGET.take()
+        waited = await gemini_budget.limiter_for(self.model).acquire()
+        if waited > 1:
+            logger.info(f"Rate limiter held {self.model} for {waited:.0f}s")
         try:
-            return await super().invoke(prompt, system_prompt)
+            result = await super().invoke(prompt, system_prompt)
+            GeminiLlm.consecutive_rate_limits = 0
+            return result
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RateLimit" in type(e).__name__ or "RESOURCE_EXHAUSTED" in msg:
+                GeminiLlm.consecutive_rate_limits += 1
                 if gemini_budget.is_daily_quota_error(msg):
                     GEMINI_BUDGET.exhaust("Gemini daily quota 429 from Google: no more calls this run")
                     logger.error(GEMINI_BUDGET.exhausted_reason)
+                elif GeminiLlm.consecutive_rate_limits >= gemini_budget.MAX_CONSECUTIVE_RATE_LIMITS:
+                    GEMINI_BUDGET.exhaust(
+                        f"{GeminiLlm.consecutive_rate_limits} Gemini 429s in a row: assuming the quota is gone, no more calls this run"
+                    )
+                    logger.error(GEMINI_BUDGET.exhausted_reason)
                 else:
-                    logger.warning(f"Gemini rate limited (per-minute); retries already backed off: {msg[:200]}")
+                    logger.warning(f"Gemini rate limited ({GeminiLlm.consecutive_rate_limits} in a row): {msg[:160]}")
             raise
 
 
@@ -284,9 +302,10 @@ def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") ->
     except Exception as e:
         print(f"❌  Could not list open questions in {tournament}: {type(e).__name__}: {str(e)[:200]}")
         return 1
-    print(f"✅  {len(questions)} open question(s) in {tournament}:")
+    done = sum(1 for q in questions if q.already_forecasted)
+    print(f"✅  {len(questions)} open question(s) in {tournament}, {done} already forecast by this bot account:")
     for q in questions:
-        print(f"    • {q.page_url}")
+        print(f"    • {q.page_url}  {'(forecast submitted)' if q.already_forecasted else '(no forecast yet)'}")
     blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
     if blockers:
         print("⏸️   LLM keys: not ready, the bot would skip this run because:")
@@ -302,6 +321,7 @@ def build_bot(publish: bool, predictions: int) -> GigbotBot:
         research_reports_per_question=1,
         predictions_per_research_report=predictions,
         use_research_summary_to_forecast=False,
+        enable_summarize_research=False,  # the summary is only decoration in the report; it cost one call per question
         publish_reports_to_metaculus=publish,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
@@ -386,8 +406,12 @@ if __name__ == "__main__":
     try:
         reports = _run(bot, client, args.mode)
     finally:
-        if GEMINI_BUDGET.used_this_run:
+        if MODE == "gemini":
             print(GEMINI_BUDGET.summary())
             gemini_budget.record_usage(GEMINI_BUDGET.used_this_run)
-    bot.log_report_summary(reports)
+    # Partial failures (a question that lost too many samples to 429s) are reported, not fatal: the other
+    # forecasts were submitted. The run fails only when nothing succeeded although there were questions.
+    bot.log_report_summary(reports, raise_errors=False)
     print_run_summary_banner(reports, will_publish=publish, tournament_url=TOURNAMENT_URLS[args.mode])
+    if reports and all(isinstance(r, BaseException) for r in reports):
+        raise SystemExit(1)

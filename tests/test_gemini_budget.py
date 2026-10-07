@@ -68,6 +68,38 @@ def test_budget_from_env_uses_cap_and_stored_usage(monkeypatch):
     assert b2.cap == gb.DEFAULT_DAILY_CAP and b2.used_at_start == 0
 
 
-def test_record_usage_without_token_is_a_noop():
-    assert gb.record_usage(3, env={}) is None
-    assert gb.record_usage(0, env={"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY": "a/b"}) is None
+def test_record_usage_zero_delta_still_writes_current_state(tmp_path):
+    env = {"GEMINI_USAGE_FILE": str(tmp_path / "u.json")}
+    assert gb.record_usage(0, env) == gb.format_usage(gb.pacific_today(), 0)
+
+
+def test_rate_limiter_window(tmp_path):
+    import asyncio
+    now = [1000.0]
+    slept = []
+    async def fake_sleep(s):
+        slept.append(s); now[0] += s
+    rl = gb.RateLimiter(per_minute=3, clock=lambda: now[0], sleeper=fake_sleep)
+    async def run():
+        for _ in range(3):
+            assert await rl.acquire() == 0.0
+        waited = await rl.acquire()   # 4th within the minute must wait until the first expires
+        assert 59 < waited <= 60 and slept
+        now[0] += 120
+        assert await rl.acquire() == 0.0
+    asyncio.run(run())
+
+
+def test_usage_file_round_trip_and_rollover(tmp_path):
+    f = tmp_path / "u.json"
+    env = {"GEMINI_USAGE_FILE": str(f)}
+    today = gb.pacific_today()
+    assert gb.budget_from_env(env).used_at_start == 0
+    assert gb.record_usage(5, env) == gb.format_usage(today, 5)
+    assert gb.record_usage(2, env) == gb.format_usage(today, 7)
+    assert gb.budget_from_env(env).used_at_start == 7
+    f.write_text(gb.format_usage("2020-01-01", 999))   # yesterday's file
+    assert gb.budget_from_env(env).used_at_start == 0
+    assert gb.record_usage(1, env) == gb.format_usage(today, 1)
+    env2 = dict(env, GEMINI_USAGE=gb.format_usage(today, 50))  # env override wins
+    assert gb.budget_from_env(env2).used_at_start == 50
