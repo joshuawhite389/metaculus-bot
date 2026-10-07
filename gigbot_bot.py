@@ -306,6 +306,20 @@ def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") ->
     print(f"✅  {len(questions)} open question(s) in {tournament}, {done} already forecast by this bot account:")
     for q in questions:
         print(f"    • {q.page_url}  {'(forecast submitted)' if q.already_forecasted else '(no forecast yet)'}")
+    # Which tournaments the live run targets, and whether they currently have open questions. The library's
+    # season constant and the slug/id from our research are listed side by side so a mismatch shows up here.
+    targets = [client.CURRENT_AI_COMPETITION_ID, "fall-futureeval-2026", 33121, client.CURRENT_MINIBENCH_ID]
+    seen = []
+    for tid in targets:
+        if tid in seen:
+            continue
+        seen.append(tid)
+        try:
+            qs = client.get_all_open_questions_from_tournament(tid)
+            done = sum(1 for q in qs if q.already_forecasted)
+            print(f"ℹ️   Tournament {tid!r}: {len(qs)} open question(s), {done} already forecast by this bot")
+        except Exception as e:
+            print(f"ℹ️   Tournament {tid!r}: lookup failed: {type(e).__name__}: {str(e)[:120]}")
     blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
     if blockers:
         print("⏸️   LLM keys: not ready, the bot would skip this run because:")
