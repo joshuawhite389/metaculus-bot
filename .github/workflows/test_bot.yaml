@@ -2,6 +2,11 @@ name: Test Bot
 
 on:
   workflow_dispatch:
+    inputs:
+      check_only:
+        description: "Only check the Metaculus token and list open bot-testing-area questions (no LLM, nothing posted)"
+        type: boolean
+        default: false
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -38,7 +43,7 @@ jobs:
         run: poetry install --no-interaction --no-root
       - name: Run bot
         run: |
-          poetry run python gigbot_bot.py --mode test_questions
+          poetry run python gigbot_bot.py --mode test_questions ${{ inputs.check_only && '--check-only' || '' }}
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:

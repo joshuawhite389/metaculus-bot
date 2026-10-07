@@ -11,11 +11,17 @@ gigbot's FutureEval bot: the Metaculus template (main.py, FallTemplateBot2026) p
 - A credit guard: reads the OpenRouter key's remaining credit before each run, cuts the
   ensemble when credit runs low and stops cleanly before it runs out. No paid key is ever used
   unless someone sets one.
+- A key gate (provider_keys.py): a run skips quietly, saying which key is missing, until every
+  configured model's provider key is set; it starts forecasting automatically once it is. The
+  Metaculus LLM proxy ("metaculus/..." models) is reported as unusable: its hostname no longer
+  exists (checked 2026-10-07).
+- `--check-only`: proves METACULUS_TOKEN authenticates and lists the open bot-testing-area
+  questions, without calling any LLM or posting anything.
 
 Everything else (question fetching, numeric/multiple-choice/date handling, posting the private
 reasoning comment) is the template's, unchanged.
 
-Run:  python gigbot_bot.py --mode tournament | test_questions | metaculus_cup  [--dry-run]
+Run:  python gigbot_bot.py --mode tournament | test_questions | metaculus_cup  [--dry-run] [--check-only]
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from forecasting_tools import (
 )
 
 import forecaster_core as core
+import provider_keys
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +179,35 @@ Keep it under 500 words.
 """.strip()
 
 
+ALL_MODELS = FORECASTER_MODELS + [RESEARCHER_MODEL, PARSER_MODEL]
+
+
+def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") -> int:
+    """Prove the Metaculus token works and show what the bot would see. Exit code: 0 ok, 1 not."""
+    try:
+        user_id = client.get_current_user_id()
+    except Exception as e:
+        print(f"❌  METACULUS_TOKEN does not authenticate: {type(e).__name__}: {str(e)[:200]}")
+        return 1
+    print(f"✅  METACULUS_TOKEN authenticates (bot user id {user_id}).")
+    try:
+        questions = client.get_all_open_questions_from_tournament(tournament)
+    except Exception as e:
+        print(f"❌  Could not list open questions in {tournament}: {type(e).__name__}: {str(e)[:200]}")
+        return 1
+    print(f"✅  {len(questions)} open question(s) in {tournament}:")
+    for q in questions:
+        print(f"    • {q.page_url}")
+    blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
+    if blockers:
+        print("⏸️   LLM keys: not ready, the bot would skip this run because:")
+        for b in blockers:
+            print(f"    • {b}")
+    else:
+        print(f"✅  LLM keys: ready for {', '.join(ALL_MODELS)}")
+    return 0
+
+
 def build_bot(publish: bool, predictions: int) -> GigbotBot:
     return GigbotBot(
         research_reports_per_question=1,
@@ -197,13 +233,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run gigbot's forecasting bot")
     parser.add_argument("--mode", choices=["tournament", "metaculus_cup", "test_questions"], default="tournament")
     parser.add_argument("--dry-run", action="store_true", help="forecast but don't post to Metaculus")
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="only check the Metaculus token, list open bot-testing-area questions and report key readiness",
+    )
     args = parser.parse_args()
 
     check_environment(strict=True)
-    uses_openrouter = any(m.startswith("openrouter/") for m in FORECASTER_MODELS + [RESEARCHER_MODEL])
-    if uses_openrouter and not os.getenv("OPENROUTER_API_KEY"):
+    if args.check_only:
+        raise SystemExit(check_only(MetaculusClient()))
+    blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
+    if blockers:
         # Normal while waiting for the credits email: skip quietly instead of failing every 20 min.
-        print("OPENROUTER_API_KEY is not set yet (waiting for Metaculus credits?): not forecasting this run.")
+        # The run starts forecasting by itself once the missing key is set as a repository secret.
+        print("Not forecasting this run; a model's provider key is missing:")
+        for b in blockers:
+            print(f"  • {b}")
         raise SystemExit(0)
     predictions = PREDICTIONS_PER_QUESTION
     credit = openrouter_credit_remaining()

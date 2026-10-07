@@ -15,12 +15,22 @@ What it changes (everything else is the template's):
   (+0.014 log score per question) but within noise. A calibration hook exists and is set to identity, because
   fitting it didn't help out of sample.
 - **Credit guard:** reads the OpenRouter key's remaining credit each run, drops to 3 forecasts per question below
-  $15 and stops below $3. With no OpenRouter key yet, a run exits quietly.
+  $15 and stops below $3.
+- **Key gate** (`provider_keys.py`, added 2026-10-07): a run skips quietly, printing which provider key is missing,
+  until every configured model's key is set; it starts forecasting on its own once the key lands as a repository
+  secret. Any litellm provider works (`openrouter/`, `gemini/`, `anthropic/`, `openai/`, `perplexity/`, ...).
+  **`metaculus/...` models are reported as unusable**, not tried: forecasting-tools still routes them to the
+  Metaculus LLM proxy at `llm-proxy.metaculus.com` (and still defaults to them when only `METACULUS_TOKEN` is set),
+  but that hostname has no DNS record any more (NXDOMAIN on Cloudflare and Google resolvers, 2026-10-07), and the
+  current resources page offers credits only as an OpenRouter key. So the proxy is not a fallback while the credits
+  email is pending; the gate replaces a planned proxy fallback.
+- **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions and reports
+  key readiness, with no LLM call and nothing posted. In Actions: `Test Bot → Run workflow → check_only`.
 - **Workflows:** a cached venv (faster, fewer Actions minutes); the Metaculus Cup workflow is manual-only.
 - Model names can be changed without code edits through repository **variables** `FORECASTER_MODELS`,
   `RESEARCHER_MODEL` and `PARSER_MODEL`.
 
-Tests: `python -m pytest tests/test_core.py` (maths, no network) and `python tests/offline_e2e.py` (the whole
+Tests: `python -m pytest tests/test_core.py tests/test_provider_keys.py` (maths and the key gate, no network) and `python tests/offline_e2e.py` (the whole
 pipeline on binary, multiple-choice and numeric questions, with LLM calls routed to a local `claude` CLI and nothing
 posted).
 

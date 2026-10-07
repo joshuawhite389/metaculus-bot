@@ -74,8 +74,9 @@ def check_environment(strict: bool = True) -> None:
     )
     if not has_llm_key:
         print(
-            "⚠️  No LLM key set (OPENROUTER/OPENAI/ANTHROPIC). The bot will fall back\n"
-            "    to the Metaculus LLM proxy. Free OpenRouter credits: "
+            "⚠️  No LLM key set (OPENROUTER/OPENAI/ANTHROPIC). gigbot_bot.py will skip\n"
+            "    forecasting until one is set. (The Metaculus LLM proxy the template used\n"
+            "    to fall back to no longer exists.) Free OpenRouter credits: "
             "https://forms.gle/aQdYMq9Pisrf1v7d8\n"
         )
 
