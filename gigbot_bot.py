@@ -106,6 +106,12 @@ PARSER_MODEL = _env("PARSER_MODEL", DEFAULTS[MODE]["PARSER_MODEL"])
 PREDICTIONS_PER_QUESTION = int(_env("PREDICTIONS_PER_QUESTION", DEFAULTS[MODE]["PREDICTIONS_PER_QUESTION"]))
 NO_RESEARCH = RESEARCHER_MODEL.strip().lower() in ("none", "off", "skip")
 
+# The seasonal tournament, by slug, not by the library's CURRENT_AI_COMPETITION_ID: the forecasting-tools version
+# pinned in poetry.lock still pointed that constant at Summer 2026 (33022, closed) on 2026-10-07, which would have
+# silently forecast nothing all season. Override with the TOURNAMENT_ID variable when the season changes.
+SEASONAL_TOURNAMENT = _env("TOURNAMENT_ID", "fall-futureeval-2026")
+MINIBENCH_TOURNAMENT = _env("MINIBENCH_ID", "minibench")
+
 # One shared Gemini budget per process (see gemini_budget.py). Only consulted by GeminiLlm.
 GEMINI_BUDGET = gemini_budget.budget_from_env()
 
@@ -308,7 +314,7 @@ def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") ->
         print(f"    • {q.page_url}  {'(forecast submitted)' if q.already_forecasted else '(no forecast yet)'}")
     # Which tournaments the live run targets, and whether they currently have open questions. The library's
     # season constant and the slug/id from our research are listed side by side so a mismatch shows up here.
-    targets = [client.CURRENT_AI_COMPETITION_ID, "fall-futureeval-2026", 33121, client.CURRENT_MINIBENCH_ID]
+    targets = [SEASONAL_TOURNAMENT, client.CURRENT_AI_COMPETITION_ID, MINIBENCH_TOURNAMENT]
     seen = []
     for tid in targets:
         if tid in seen:
@@ -360,8 +366,8 @@ TOURNAMENT_URLS = {
 
 def _run(bot: GigbotBot, client: MetaculusClient, mode: str) -> list:
     if mode == "tournament":
-        reports = asyncio.run(bot.forecast_on_tournament(client.CURRENT_AI_COMPETITION_ID, return_exceptions=True))
-        reports += asyncio.run(bot.forecast_on_tournament(client.CURRENT_MINIBENCH_ID, return_exceptions=True))
+        reports = asyncio.run(bot.forecast_on_tournament(SEASONAL_TOURNAMENT, return_exceptions=True))
+        reports += asyncio.run(bot.forecast_on_tournament(MINIBENCH_TOURNAMENT, return_exceptions=True))
         return reports
     if mode == "metaculus_cup":
         bot.skip_previously_forecasted_questions = False
@@ -408,6 +414,7 @@ if __name__ == "__main__":
 
     publish = not args.dry_run
     print_startup_banner(args.mode, will_publish=publish)
+    print(f"Tournaments: {SEASONAL_TOURNAMENT} + {MINIBENCH_TOURNAMENT}")
     print(f"Provider mode: {MODE}; forecasters {FORECASTER_MODELS}; researcher {RESEARCHER_MODEL}; parser {PARSER_MODEL}; {predictions} predictions/question")
     if MODE == "gemini":
         print(f"Gemini daily cap: {GEMINI_BUDGET.used_at_start}/{GEMINI_BUDGET.cap} used before this run ({GEMINI_BUDGET.today} Pacific)")

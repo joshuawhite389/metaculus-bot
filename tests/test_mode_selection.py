@@ -32,3 +32,8 @@ def test_gemini_defaults_are_free_tier_and_research_free():
 def test_make_llm_wraps_only_gemini():
     assert isinstance(g.make_llm("gemini/gemini-3.1-flash-lite", temperature=0.1), g.GeminiLlm)
     assert not isinstance(g.make_llm("openrouter/openai/gpt-6-luna", temperature=0.1), g.GeminiLlm)
+
+
+def test_seasonal_tournament_is_the_fall_2026_slug_not_a_library_constant():
+    assert g.SEASONAL_TOURNAMENT == "fall-futureeval-2026"
+    assert g.MINIBENCH_TOURNAMENT == "minibench"

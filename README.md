@@ -41,6 +41,10 @@ What it changes (everything else is the template's):
   library's 5–60 s backoff, and 8 consecutive 429s (or a daily-quota 429) stop the run. The research summary is off
   (it cost a call per question). A question that loses too many samples is reported as failed without failing the
   run; only a run where nothing succeeded exits non-zero. Measured 2026-10-07: 9 test questions = 45 calls.
+- **Tournament by slug** (2026-10-07): the live run forecasts `fall-futureeval-2026` and `minibench` by name
+  (variables `TOURNAMENT_ID`, `MINIBENCH_ID`), not the library's `CURRENT_AI_COMPETITION_ID`: the forecasting-tools
+  version pinned in `poetry.lock` still pointed that constant at the closed Summer 2026 tournament (33022), so the
+  template setup would have forecast nothing all season. `--check-only` lists both so a mismatch shows.
 - **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions and reports
   key readiness, with no LLM call and nothing posted. In Actions: `Test Bot → Run workflow → check_only`.
 - **Workflows:** a cached venv (faster, fewer Actions minutes); the Metaculus Cup workflow is manual-only.
