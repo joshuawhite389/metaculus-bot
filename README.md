@@ -24,13 +24,26 @@ What it changes (everything else is the template's):
   but that hostname has no DNS record any more (NXDOMAIN on Cloudflare and Google resolvers, 2026-10-07), and the
   current resources page offers credits only as an OpenRouter key. So the proxy is not a fallback while the credits
   email is pending; the gate replaces a planned proxy fallback.
+- **Interim Gemini mode** (added 2026-10-07, gigbot's decision): with no `OPENROUTER_API_KEY` but a `GEMINI_API_KEY`
+  (an existing free-tier key shared with other gigbot projects), the defaults switch to `gemini/gemini-3.1-flash-lite`
+  + `gemini/gemini-3.5-flash-lite` (alternating), 3 forecasts per question, **no web research** (Google Search
+  grounding returns 429 on the free tier), the binary probability parsed from the "Probability: NN%" line by regex
+  (parser LLM only as fallback) and one parser validation sample, to spend as few calls as possible. The OpenRouter
+  ensemble takes over automatically the moment `OPENROUTER_API_KEY` is set; repository variables still override any
+  model name (`RESEARCHER_MODEL=none` skips research).
+- **Gemini daily cap** (`gemini_budget.py`): a hard cap on Gemini calls per Pacific day, shared across runs through the
+  repository variable `GEMINI_USAGE` (`{"day": ..., "calls": N}`), written back at the end of each run with the
+  workflow's `GITHUB_TOKEN` (`permissions: actions: write`). Default cap 300 = 60% of the lowest credible free-tier
+  daily quota we found for Flash-Lite (sources say 500–1,000; Google no longer publishes it); override with the
+  variable `GEMINI_DAILY_CAP`. At the cap the run stops before the next call; a daily-quota 429 from Google stops the
+  run too; per-minute 429s are retried with the library's 5–60 s backoff.
 - **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions and reports
   key readiness, with no LLM call and nothing posted. In Actions: `Test Bot → Run workflow → check_only`.
 - **Workflows:** a cached venv (faster, fewer Actions minutes); the Metaculus Cup workflow is manual-only.
 - Model names can be changed without code edits through repository **variables** `FORECASTER_MODELS`,
   `RESEARCHER_MODEL` and `PARSER_MODEL`.
 
-Tests: `python -m pytest tests/test_core.py tests/test_provider_keys.py` (maths and the key gate, no network) and `python tests/offline_e2e.py` (the whole
+Tests: `python -m pytest tests/ --ignore=tests/offline_e2e.py` (maths, key gate, Gemini budget, mode selection; no network) and `python tests/offline_e2e.py` (the whole
 pipeline on binary, multiple-choice and numeric questions, with LLM calls routed to a local `claude` CLI and nothing
 posted).
 

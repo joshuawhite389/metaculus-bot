@@ -12,6 +12,11 @@ concurrency:
 
 
 # Daily job to run the simple forecast bot
+# actions: write lets the run update the GEMINI_USAGE repository variable (shared daily call cap).
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
@@ -52,9 +57,14 @@ jobs:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_USAGE: ${{ vars.GEMINI_USAGE }}
+          GEMINI_DAILY_CAP: ${{ vars.GEMINI_DAILY_CAP }}
+          GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           FORECASTER_MODELS: ${{ vars.FORECASTER_MODELS }}
           RESEARCHER_MODEL: ${{ vars.RESEARCHER_MODEL }}
           PARSER_MODEL: ${{ vars.PARSER_MODEL }}
+          PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION }}

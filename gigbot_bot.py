@@ -17,6 +17,12 @@ gigbot's FutureEval bot: the Metaculus template (main.py, FallTemplateBot2026) p
   exists (checked 2026-10-07).
 - `--check-only`: proves METACULUS_TOKEN authenticates and lists the open bot-testing-area
   questions, without calling any LLM or posting anything.
+- Interim Gemini mode (2026-10-07): with no OPENROUTER_API_KEY but a GEMINI_API_KEY, the defaults
+  switch to free-tier Gemini Flash-Lite models, 3 forecasts per question, no web research (Google
+  Search grounding is not on the free tier), the binary probability parsed by regex first (parser
+  LLM only as fallback), and a hard daily cap on Gemini calls shared across runs through the
+  GEMINI_USAGE repository variable (gemini_budget.py). The OpenRouter ensemble takes over by itself
+  the moment OPENROUTER_API_KEY exists. Repository variables still override every model name.
 
 Everything else (question fetching, numeric/multiple-choice/date handling, posting the private
 reasoning comment) is the template's, unchanged.
@@ -39,15 +45,19 @@ from bot_helpers import check_environment, print_run_summary_banner, print_start
 from main import FallTemplateBot2026  # also runs the template's dependency silencing
 from forecasting_tools import (
     AskNewsSearcher,
+    BinaryPrediction,
     BinaryQuestion,
     GeneralLlm,
     MetaculusClient,
     MetaculusQuestion,
     PredictionTypes,
     ReasonedPrediction,
+    clean_indents,
+    structure_output,
 )
 
 import forecaster_core as core
+import gemini_budget
 import provider_keys
 
 logger = logging.getLogger(__name__)
@@ -60,14 +70,66 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name) or default
 
 
-FORECASTER_MODELS = [
-    m.strip()
-    for m in _env("FORECASTER_MODELS", "openrouter/anthropic/claude-sonnet-5.5,openrouter/openai/gpt-6.1-sol").split(",")
-    if m.strip()
-]
-RESEARCHER_MODEL = _env("RESEARCHER_MODEL", "openrouter/openai/gpt-6.1-sol:online")
-PARSER_MODEL = _env("PARSER_MODEL", "openrouter/openai/gpt-6-luna")
-PREDICTIONS_PER_QUESTION = int(_env("PREDICTIONS_PER_QUESTION", "5"))
+# Defaults per provider mode. RESEARCHER_MODEL "none" means: skip the web-research step.
+DEFAULTS = {
+    "openrouter": {
+        "FORECASTER_MODELS": "openrouter/anthropic/claude-sonnet-5.5,openrouter/openai/gpt-6.1-sol",
+        "RESEARCHER_MODEL": "openrouter/openai/gpt-6.1-sol:online",
+        "PARSER_MODEL": "openrouter/openai/gpt-6-luna",
+        "PREDICTIONS_PER_QUESTION": "5",
+    },
+    # Free tier: Flash-Lite only (checked 2026-10-07: gemini-3.1-flash-lite and gemini-3.5-flash-lite
+    # answer on this key; Google Search grounding returns 429 RESOURCE_EXHAUSTED, so no research).
+    "gemini": {
+        "FORECASTER_MODELS": "gemini/gemini-3.1-flash-lite,gemini/gemini-3.5-flash-lite",
+        "RESEARCHER_MODEL": "none",
+        "PARSER_MODEL": "gemini/gemini-3.1-flash-lite",
+        "PREDICTIONS_PER_QUESTION": "3",
+    },
+}
+
+
+def provider_mode(env=os.environ) -> str:
+    """OpenRouter whenever its key exists (the credits key wins); Gemini as the interim; else OpenRouter defaults (the key gate then skips)."""
+    if (env.get("OPENROUTER_API_KEY") or "").strip():
+        return "openrouter"
+    if (env.get("GEMINI_API_KEY") or "").strip():
+        return "gemini"
+    return "openrouter"
+
+
+MODE = provider_mode()
+FORECASTER_MODELS = [m.strip() for m in _env("FORECASTER_MODELS", DEFAULTS[MODE]["FORECASTER_MODELS"]).split(",") if m.strip()]
+RESEARCHER_MODEL = _env("RESEARCHER_MODEL", DEFAULTS[MODE]["RESEARCHER_MODEL"])
+PARSER_MODEL = _env("PARSER_MODEL", DEFAULTS[MODE]["PARSER_MODEL"])
+PREDICTIONS_PER_QUESTION = int(_env("PREDICTIONS_PER_QUESTION", DEFAULTS[MODE]["PREDICTIONS_PER_QUESTION"]))
+NO_RESEARCH = RESEARCHER_MODEL.strip().lower() in ("none", "off", "skip")
+
+# One shared Gemini budget per process (see gemini_budget.py). Only consulted by GeminiLlm.
+GEMINI_BUDGET = gemini_budget.budget_from_env()
+
+
+class GeminiLlm(GeneralLlm):
+    """GeneralLlm that counts every call against the shared daily Gemini cap and stops on a daily-quota 429."""
+
+    async def invoke(self, prompt, system_prompt=None):  # type: ignore[override]
+        GEMINI_BUDGET.take()
+        try:
+            return await super().invoke(prompt, system_prompt)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RateLimit" in type(e).__name__ or "RESOURCE_EXHAUSTED" in msg:
+                if gemini_budget.is_daily_quota_error(msg):
+                    GEMINI_BUDGET.exhaust("Gemini daily quota 429 from Google: no more calls this run")
+                    logger.error(GEMINI_BUDGET.exhausted_reason)
+                else:
+                    logger.warning(f"Gemini rate limited (per-minute); retries already backed off: {msg[:200]}")
+            raise
+
+
+def make_llm(model: str, **kwargs) -> GeneralLlm:
+    cls = GeminiLlm if model.startswith("gemini/") else GeneralLlm
+    return cls(model=model, **kwargs)
 
 # Credit guard, in US dollars of OpenRouter credit.
 STOP_BELOW = float(_env("CREDIT_STOP_BELOW", "3"))
@@ -101,8 +163,11 @@ class GigbotBot(FallTemplateBot2026):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._forecasters = itertools.cycle(
-            [GeneralLlm(model=m, temperature=0.5, timeout=180, allowed_tries=3) for m in FORECASTER_MODELS]
+            [make_llm(m, temperature=0.5, timeout=180, allowed_tries=3) for m in FORECASTER_MODELS]
         )
+        if MODE == "gemini":
+            # Every parser validation sample is another free-tier call; one is enough.
+            self._structure_output_validation_samples = 1
 
     # Every template forecast function calls get_llm("default", "llm"); alternating here gives
     # every question type a two-provider ensemble.
@@ -116,11 +181,14 @@ class GigbotBot(FallTemplateBot2026):
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             parts = []
-            try:
-                web = await self.get_llm("researcher", "llm").invoke(research_prompt(question))
-                parts.append(web)
-            except Exception as e:
-                logger.warning(f"Web research failed for {question.page_url}: {e}")
+            if NO_RESEARCH:
+                logger.info(f"Web research skipped (RESEARCHER_MODEL={RESEARCHER_MODEL}) for {question.page_url}")
+            else:
+                try:
+                    web = await self.get_llm("researcher", "llm").invoke(research_prompt(question))
+                    parts.append(web)
+                except Exception as e:
+                    logger.warning(f"Web research failed for {question.page_url}: {e}")
             if os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"):
                 try:
                     news = await AskNewsSearcher().call_preconfigured_version(
@@ -145,7 +213,28 @@ class GigbotBot(FallTemplateBot2026):
             (question.fine_print or "") + "\n" + self._get_conditional_disclaimer_if_necessary(question),
             research,
         )
-        return await self._binary_prompt_to_forecast(question, prompt)
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        prob = core.parse_probability(reasoning)
+        if prob is None:
+            # The prompt asks for "Probability: NN%" on the last line; only if that's missing do we spend a parser call.
+            logger.warning(f"No 'Probability: NN%' line for {question.page_url}; falling back to the parser LLM")
+            parsed: BinaryPrediction = await structure_output(
+                reasoning,
+                BinaryPrediction,
+                model=self.get_llm("parser", "llm"),
+                num_validation_samples=self._structure_output_validation_samples,
+                additional_instructions=clean_indents(
+                    f"""
+                    The text given to you is trying to give a probability forecast for a binary question.
+                    {self._create_resolved_question_parsing_message()}
+                    """
+                ),
+            )
+            prob = parsed.prediction_in_decimal
+        prob = max(0.01, min(0.99, float(prob)))
+        logger.info(f"Forecasted URL {question.page_url} with prediction: {prob}.")
+        return ReasonedPrediction(prediction_value=prob, reasoning=reasoning)
 
     async def _aggregate_predictions(
         self, predictions: list[PredictionTypes], question: MetaculusQuestion
@@ -179,7 +268,7 @@ Keep it under 500 words.
 """.strip()
 
 
-ALL_MODELS = FORECASTER_MODELS + [RESEARCHER_MODEL, PARSER_MODEL]
+ALL_MODELS = FORECASTER_MODELS + ([] if NO_RESEARCH else [RESEARCHER_MODEL]) + [PARSER_MODEL]
 
 
 def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") -> int:
@@ -218,12 +307,33 @@ def build_bot(publish: bool, predictions: int) -> GigbotBot:
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
         llms={
-            "default": GeneralLlm(model=FORECASTER_MODELS[0], temperature=0.5, timeout=180, allowed_tries=3),
-            "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.3),
-            "researcher": GeneralLlm(model=RESEARCHER_MODEL, temperature=0.1, timeout=240, allowed_tries=2),
-            "parser": GeneralLlm(model=PARSER_MODEL, temperature=0.0),
+            "default": make_llm(FORECASTER_MODELS[0], temperature=0.5, timeout=180, allowed_tries=3),
+            "summarizer": make_llm(PARSER_MODEL, temperature=0.3),
+            # With no research, point "researcher" at the parser model: it's never invoked (see run_research),
+            # but forecasting-tools would otherwise fill in a dead metaculus/ default.
+            "researcher": make_llm(PARSER_MODEL if NO_RESEARCH else RESEARCHER_MODEL, temperature=0.1, timeout=240, allowed_tries=2),
+            "parser": make_llm(PARSER_MODEL, temperature=0.0),
         },
     )
+
+
+TOURNAMENT_URLS = {
+    "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
+    "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-fall-2026/",
+    "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
+}
+
+
+def _run(bot: GigbotBot, client: MetaculusClient, mode: str) -> list:
+    if mode == "tournament":
+        reports = asyncio.run(bot.forecast_on_tournament(client.CURRENT_AI_COMPETITION_ID, return_exceptions=True))
+        reports += asyncio.run(bot.forecast_on_tournament(client.CURRENT_MINIBENCH_ID, return_exceptions=True))
+        return reports
+    if mode == "metaculus_cup":
+        bot.skip_previously_forecasted_questions = False
+        return asyncio.run(bot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True))
+    bot.skip_previously_forecasted_questions = False
+    return asyncio.run(bot.forecast_on_tournament("bot-testing-area", return_exceptions=True))
 
 
 if __name__ == "__main__":
@@ -264,19 +374,20 @@ if __name__ == "__main__":
 
     publish = not args.dry_run
     print_startup_banner(args.mode, will_publish=publish)
+    print(f"Provider mode: {MODE}; forecasters {FORECASTER_MODELS}; researcher {RESEARCHER_MODEL}; parser {PARSER_MODEL}; {predictions} predictions/question")
+    if MODE == "gemini":
+        print(f"Gemini daily cap: {GEMINI_BUDGET.used_at_start}/{GEMINI_BUDGET.cap} used before this run ({GEMINI_BUDGET.today} Pacific)")
+        if GEMINI_BUDGET.remaining <= 0:
+            print("Gemini daily cap already reached: not forecasting this run.")
+            raise SystemExit(0)
     bot = build_bot(publish, predictions)
     client = MetaculusClient()
-    if args.mode == "tournament":
-        reports = asyncio.run(bot.forecast_on_tournament(client.CURRENT_AI_COMPETITION_ID, return_exceptions=True))
-        reports += asyncio.run(bot.forecast_on_tournament(client.CURRENT_MINIBENCH_ID, return_exceptions=True))
-        url = "https://www.metaculus.com/tournament/fall-futureeval-2026/"
-    elif args.mode == "metaculus_cup":
-        bot.skip_previously_forecasted_questions = False
-        reports = asyncio.run(bot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True))
-        url = "https://www.metaculus.com/tournament/metaculus-cup-fall-2026/"
-    else:
-        bot.skip_previously_forecasted_questions = False
-        reports = asyncio.run(bot.forecast_on_tournament("bot-testing-area", return_exceptions=True))
-        url = "https://www.metaculus.com/tournament/bot-testing-area/"
+    reports = []
+    try:
+        reports = _run(bot, client, args.mode)
+    finally:
+        if GEMINI_BUDGET.used_this_run:
+            print(GEMINI_BUDGET.summary())
+            gemini_budget.record_usage(GEMINI_BUDGET.used_this_run)
     bot.log_report_summary(reports)
-    print_run_summary_banner(reports, will_publish=publish, tournament_url=url)
+    print_run_summary_banner(reports, will_publish=publish, tournament_url=TOURNAMENT_URLS[args.mode])
