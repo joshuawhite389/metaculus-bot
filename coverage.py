@@ -93,10 +93,20 @@ def leaderboard(client: MetaculusClient, tournament: str, user_id: int | None) -
     except Exception as e:
         print(f"ℹ️   {tournament} leaderboard: not available ({type(e).__name__}: {str(e)[:120]})")
         return
-    entries = data.get("entries") or []
+    boards = data if isinstance(data, list) else [data]
+    for board in boards:
+        try:
+            _print_board(tournament, board, user_id)
+        except Exception as e:
+            keys = list(board)[:12] if isinstance(board, dict) else type(board).__name__
+            print(f"ℹ️   {tournament} leaderboard: unexpected shape ({type(e).__name__}: {e}); keys {keys}")
+
+
+def _print_board(tournament: str, board: dict, user_id: int | None) -> None:
+    entries = board.get("entries") or []
     mine = [e for e in entries if (e.get("user") or {}).get("id") == user_id]
-    me = data.get("userEntry") or (mine[0] if mine else None)
-    name = data.get("name") or data.get("score_type") or ""
+    me = board.get("userEntry") or board.get("user_entry") or (mine[0] if mine else None)
+    name = board.get("name") or board.get("score_type") or ""
     if me:
         print(f"🏁  {tournament} leaderboard {name}: rank {me.get('rank')} of {len(entries)}, "
               f"score {me.get('score')}, coverage {me.get('coverage')}, questions {me.get('contribution_count')}")
