@@ -535,8 +535,12 @@ if __name__ == "__main__":
     if MODE == "gemini":
         print(f"Gemini daily cap: {GEMINI_BUDGET.used_at_start}/{GEMINI_BUDGET.cap} used before this run ({GEMINI_BUDGET.today} Pacific)")
         if GEMINI_BUDGET.remaining <= 0:
-            print("Gemini daily cap already reached: not forecasting this run.")
-            raise SystemExit(0)
+            if args.mode == "tournament" and args.poll_minutes > 0:
+                # Keep the polling chain alive: passes make no Gemini call until the cap rolls over at Pacific midnight.
+                print("Gemini daily cap already reached: polling without forecasting until it resets.")
+            else:
+                print("Gemini daily cap already reached: not forecasting this run.")
+                raise SystemExit(0)
     bot = build_bot(publish, predictions)
     client = MetaculusClient()
     reports = []

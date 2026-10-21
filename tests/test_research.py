@@ -230,3 +230,30 @@ def test_overloaded_model_is_skipped_during_cooldown(monkeypatch):
     asyncio.run(llm.invoke("p"))
     assert calls == ["gemini/gemini-3.1-flash-lite", "gemini/gemini-3.5-flash-lite", "gemini/gemini-3.5-flash-lite"]
     assert g.GEMINI_BUDGET.used_this_run == 3
+
+
+def test_poll_at_the_cap_makes_no_calls_and_resumes_after_the_reset(monkeypatch):
+    monkeypatch.setattr(g, "MODE", "gemini")
+    budget = g.gemini_budget.Budget(cap=300, used_at_start=300, today="2026-10-21")
+    monkeypatch.setattr(g, "GEMINI_BUDGET", budget)
+    checkpoints = []
+
+    def fake_checkpoint():  # stands in for the usage file: the second checkpoint lands on a new Pacific day
+        checkpoints.append(bot.metaculus_client.calls)
+        day = "2026-10-21" if len(checkpoints) == 1 else "2026-10-22"
+        if day != budget.today:
+            budget.today, budget.used_at_start, budget.exhausted_reason = day, 0, None
+        budget.used_this_run = 0
+
+    monkeypatch.setattr(g, "checkpoint_gemini_usage", fake_checkpoint)
+
+    async def fake_sleep(s):
+        pass
+
+    monkeypatch.setattr(g.asyncio, "sleep", fake_sleep)
+    clock = iter(range(0, 10_000, 60))
+    monkeypatch.setattr(g.time, "monotonic", lambda: next(clock) * 1.0)
+    bot = FakeBot(FakeClient([{g.MINIBENCH_TOURNAMENT: [Q(9)]}]))
+    asyncio.run(g.poll_tournaments(bot, minutes=4, every=1))
+    assert checkpoints[0] == 0  # pass 1, at the cap: nothing listed, nothing forecast
+    assert bot.forecast  # after the Pacific-day rollover the question is forecast
