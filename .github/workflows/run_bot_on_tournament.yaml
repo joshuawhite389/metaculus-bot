@@ -11,14 +11,21 @@ concurrency:
   cancel-in-progress: false
 
 
-# Daily job to run the simple forecast bot
+# actions: write lets the last step start the next polling run (workflow_dispatch is the one event GITHUB_TOKEN may trigger).
 permissions:
   contents: read
+  actions: write
 
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
+    # Polling (gigbot, 2026-10-21): questions are open for exactly 3 h, but the cron above fired only every ~4 h, so
+    # each run now polls every POLL_EVERY min for POLL_MINUTES and then starts its successor. The cron stays as the
+    # backstop that restarts the chain if it breaks; the concurrency group keeps at most one run going.
+    timeout-minutes: 350
     steps: # sets up the steps that will be run in order
+      - name: Note start time
+        run: echo "RUN_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,7 +61,7 @@ jobs:
           restore-keys: gemini-usage-
       - name: Run bot
         run: |
-          poetry run python gigbot_bot.py
+          poetry run python gigbot_bot.py --poll-minutes "${POLL_MINUTES:-300}" --poll-every "${POLL_EVERY:-12}"
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -74,9 +81,27 @@ jobs:
           RESEARCHER_MODEL: ${{ vars.RESEARCHER_MODEL }}
           PARSER_MODEL: ${{ vars.PARSER_MODEL }}
           PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION }}
+          FREE_RESEARCH: ${{ vars.FREE_RESEARCH }}
+          POLL_MINUTES: ${{ vars.POLL_MINUTES }}
+          POLL_EVERY: ${{ vars.POLL_EVERY }}
       - name: Save Gemini usage counter
         if: always() && hashFiles('.gemini-usage/usage.json') != ''
         uses: actions/cache/save@v4
         with:
           path: .gemini-usage
           key: gemini-usage-${{ github.run_id }}
+      # Start the next polling run, but only after a run that actually polled for an hour or more: a run that exits
+      # early (missing key, crash) must not chain itself into a tight loop. Then the cron restarts things.
+      # Set the repository variable POLL_CHAIN=off to stop chaining.
+      - name: Start the next polling run
+        if: always() && vars.POLL_CHAIN != 'off' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          elapsed=$(( $(date +%s) - RUN_STARTED ))
+          if [ "$elapsed" -ge 3600 ]; then
+            gh workflow run run_bot_on_tournament.yaml --repo "$GITHUB_REPOSITORY" --ref main
+            echo "Started the next polling run after ${elapsed}s."
+          else
+            echo "Run lasted only ${elapsed}s: not chaining; the cron will start the next one."
+          fi

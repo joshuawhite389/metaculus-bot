@@ -38,6 +38,7 @@ import asyncio
 import itertools
 import logging
 import os
+import time
 from datetime import datetime
 
 import requests
@@ -61,6 +62,7 @@ import coverage
 import forecaster_core as core
 import gemini_budget
 import provider_keys
+import research
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +108,10 @@ RESEARCHER_MODEL = _env("RESEARCHER_MODEL", DEFAULTS[MODE]["RESEARCHER_MODEL"])
 PARSER_MODEL = _env("PARSER_MODEL", DEFAULTS[MODE]["PARSER_MODEL"])
 PREDICTIONS_PER_QUESTION = int(_env("PREDICTIONS_PER_QUESTION", DEFAULTS[MODE]["PREDICTIONS_PER_QUESTION"]))
 NO_RESEARCH = RESEARCHER_MODEL.strip().lower() in ("none", "off", "skip")
+# Free keyless research (research.py: GDELT news, Wikipedia, the resolution source, BLS) costs one planner call per
+# question. "auto" = on whenever the paid web-research step is off (Gemini mode); "on"/"off" force it.
+FREE_RESEARCH = _env("FREE_RESEARCH", "auto").strip().lower()
+USE_FREE_RESEARCH = FREE_RESEARCH == "on" or (FREE_RESEARCH == "auto" and NO_RESEARCH)
 
 # The seasonal tournament, by slug, not by the library's CURRENT_AI_COMPETITION_ID: the forecasting-tools version
 # pinned in poetry.lock still pointed that constant at Summer 2026 (33022, closed) on 2026-10-07, which would have
@@ -206,8 +212,10 @@ class GigbotBot(FallTemplateBot2026):
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             parts = []
+            if USE_FREE_RESEARCH:
+                parts.append(await research.gather_research(question, self.get_llm("parser", "llm")))
             if NO_RESEARCH:
-                logger.info(f"Web research skipped (RESEARCHER_MODEL={RESEARCHER_MODEL}) for {question.page_url}")
+                logger.info(f"Paid web research skipped (RESEARCHER_MODEL={RESEARCHER_MODEL}) for {question.page_url}")
             else:
                 try:
                     web = await self.get_llm("researcher", "llm").invoke(research_prompt(question))
@@ -365,11 +373,71 @@ TOURNAMENT_URLS = {
 }
 
 
-def _run(bot: GigbotBot, client: MetaculusClient, mode: str) -> list:
+# A question that failed this many times in one polling run is left alone for the rest of the run, so one
+# broken question can't eat the Gemini budget by being retried every pass.
+MAX_FAILURES_PER_QUESTION = 2
+CALLS_RECORDED = 0  # Gemini calls this process already wrote to the usage file at polling checkpoints
+
+
+def checkpoint_gemini_usage() -> None:
+    """Write this run's calls so far to the usage file and start counting afresh (rolls over at Pacific midnight)."""
+    global CALLS_RECORDED
+    CALLS_RECORDED += GEMINI_BUDGET.used_this_run
+    gemini_budget.record_usage(GEMINI_BUDGET.used_this_run)
+    env = {k: v for k, v in os.environ.items() if k != gemini_budget.VARIABLE_NAME}  # the manual override applied once
+    fresh = gemini_budget.budget_from_env(env)
+    if fresh.today != GEMINI_BUDGET.today:
+        GEMINI_BUDGET.exhausted_reason = None
+    GEMINI_BUDGET.cap, GEMINI_BUDGET.used_at_start, GEMINI_BUDGET.today = fresh.cap, fresh.used_at_start, fresh.today
+    GEMINI_BUDGET.used_this_run = 0
+
+
+async def poll_tournaments(bot: GigbotBot, minutes: float, every: float) -> list:
+    """
+    Forecast new questions in both tournaments, then keep polling every `every` minutes for `minutes` in total.
+    Tournament questions are open for exactly 3 hours (coverage report, 2026-10-21) and GitHub's cron fired only
+    every ~4 h, so one pass per scheduled run missed about half of them; a polling run catches each one and retries
+    a question whose forecast failed (Gemini 503s) on the next pass. minutes=0 means a single pass.
+    """
+    reports: list = []
+    failures: dict = {}
+    deadline = time.monotonic() + minutes * 60
+    passes = 0
+    while True:
+        passes += 1
+        if MODE == "gemini" and GEMINI_BUDGET.remaining <= 0:
+            logger.info(f"Pass {passes}: Gemini cap reached for {GEMINI_BUDGET.today}; only waiting")
+        else:
+            for tournament in (SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT):
+                try:
+                    questions = bot.metaculus_client.get_all_open_questions_from_tournament(tournament)
+                except Exception as e:
+                    logger.warning(f"Pass {passes}: could not list {tournament}: {type(e).__name__}: {str(e)[:160]}")
+                    continue
+                todo = [
+                    q for q in questions
+                    if not q.already_forecasted and failures.get(q.id_of_question, 0) < MAX_FAILURES_PER_QUESTION
+                ]
+                if not todo:
+                    continue
+                logger.info(f"Pass {passes}: {len(todo)} question(s) to forecast in {tournament}")
+                results = await bot.forecast_questions(todo, return_exceptions=True)
+                for q, r in zip(todo, results):
+                    if isinstance(r, BaseException):
+                        failures[q.id_of_question] = failures.get(q.id_of_question, 0) + 1
+                reports += results
+        if MODE == "gemini":
+            checkpoint_gemini_usage()
+        if time.monotonic() + every * 60 > deadline:
+            break
+        await asyncio.sleep(every * 60)
+    logger.info(f"Polling done: {passes} pass(es), {len(reports)} forecast attempt(s)")
+    return reports
+
+
+def _run(bot: GigbotBot, client: MetaculusClient, mode: str, poll_minutes: float = 0, poll_every: float = 12) -> list:
     if mode == "tournament":
-        reports = asyncio.run(bot.forecast_on_tournament(SEASONAL_TOURNAMENT, return_exceptions=True))
-        reports += asyncio.run(bot.forecast_on_tournament(MINIBENCH_TOURNAMENT, return_exceptions=True))
-        return reports
+        return asyncio.run(poll_tournaments(bot, poll_minutes, poll_every))
     if mode == "metaculus_cup":
         bot.skip_previously_forecasted_questions = False
         return asyncio.run(bot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True))
@@ -394,6 +462,13 @@ if __name__ == "__main__":
         action="store_true",
         help="only report how many tournament questions this bot account has forecast, and list the missed ones",
     )
+    parser.add_argument(
+        "--poll-minutes",
+        type=float,
+        default=float(_env("POLL_MINUTES", "0")),
+        help="tournament mode: keep polling for new questions this long (0 = one pass)",
+    )
+    parser.add_argument("--poll-every", type=float, default=float(_env("POLL_EVERY", "12")), help="minutes between passes")
     args = parser.parse_args()
 
     check_environment(strict=True)
@@ -436,10 +511,10 @@ if __name__ == "__main__":
     client = MetaculusClient()
     reports = []
     try:
-        reports = _run(bot, client, args.mode)
+        reports = _run(bot, client, args.mode, args.poll_minutes, args.poll_every)
     finally:
         if MODE == "gemini":
-            print(GEMINI_BUDGET.summary())
+            print(GEMINI_BUDGET.summary() + (f" (+{CALLS_RECORDED} recorded at earlier polling passes)" if CALLS_RECORDED else ""))
             gemini_budget.record_usage(GEMINI_BUDGET.used_this_run)
     # Partial failures (a question that lost too many samples to 429s) are reported, not fatal: the other
     # forecasts were submitted. The run fails only when nothing succeeded although there were questions.
