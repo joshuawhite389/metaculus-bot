@@ -62,7 +62,7 @@ import coverage
 import forecaster_core as core
 import gemini_budget
 import provider_keys
-import research
+import research as free_research
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +213,7 @@ class GigbotBot(FallTemplateBot2026):
         async with self._concurrency_limiter:
             parts = []
             if USE_FREE_RESEARCH:
-                parts.append(await research.gather_research(question, self.get_llm("parser", "llm")))
+                parts.append(await free_research.gather_research(question, self.get_llm("parser", "llm")))
             if NO_RESEARCH:
                 logger.info(f"Paid web research skipped (RESEARCHER_MODEL={RESEARCHER_MODEL}) for {question.page_url}")
             else:
@@ -477,7 +477,11 @@ if __name__ == "__main__":
     if args.coverage:
         # The bot went live on 2026-10-07 ~15:00Z; earlier questions can't count against it.
         live_since = datetime.fromisoformat(_env("LIVE_SINCE", "2026-10-07T15:00:00+00:00"))
-        coverage.report(MetaculusClient(), [SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT], since=live_since)
+        client = MetaculusClient()
+        coverage.report(client, [SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT], since=live_since)
+        uid = client.get_current_user_id()
+        for t in (SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT):
+            coverage.leaderboard(client, t, uid)
         raise SystemExit(0)
     blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
     if blockers:

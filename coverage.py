@@ -75,3 +75,30 @@ def report(client: MetaculusClient, tournaments: list[str | int], since: datetim
                   f"{state}: {q.question_text[:70]}")
         result[t] = (len(done), len(eligible))
     return result
+
+
+def leaderboard(client: MetaculusClient, tournament: str, user_id: int | None) -> None:
+    """Best effort: print the tournament leaderboard size and this bot's rank (endpoints as the website uses them)."""
+    import requests
+
+    headers = client._get_auth_headers()["headers"]
+    base = client.base_url
+    try:
+        proj = requests.get(f"{base}/projects/tournaments/{tournament}/", headers=headers, timeout=30)
+        proj.raise_for_status()
+        pid = proj.json()["id"]
+        r = requests.get(f"{base}/leaderboards/project/{pid}/", headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"ℹ️   {tournament} leaderboard: not available ({type(e).__name__}: {str(e)[:120]})")
+        return
+    entries = data.get("entries") or []
+    mine = [e for e in entries if (e.get("user") or {}).get("id") == user_id]
+    me = data.get("userEntry") or (mine[0] if mine else None)
+    name = data.get("name") or data.get("score_type") or ""
+    if me:
+        print(f"🏁  {tournament} leaderboard {name}: rank {me.get('rank')} of {len(entries)}, "
+              f"score {me.get('score')}, coverage {me.get('coverage')}, questions {me.get('contribution_count')}")
+    else:
+        print(f"🏁  {tournament} leaderboard {name}: {len(entries)} entries, this bot not listed yet")

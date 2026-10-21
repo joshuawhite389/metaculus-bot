@@ -167,3 +167,17 @@ def test_poll_retries_a_failed_question_at_most_twice(monkeypatch):
     asyncio.run(g.poll_tournaments(bot, minutes=6, every=1))
     assert bot.forecast == [7, 7]  # two failures, then left alone
     assert slept and all(s == 60 for s in slept)
+
+
+def test_bot_run_research_uses_free_research(monkeypatch):
+    """The real method (regression: a local variable named `research` once shadowed the module)."""
+    async def fake_gather(question, planner):
+        return "FREE RESEARCH BLOCK"
+
+    monkeypatch.setattr(g.free_research, "gather_research", fake_gather)
+    monkeypatch.setattr(g, "USE_FREE_RESEARCH", True)
+    monkeypatch.setattr(g, "NO_RESEARCH", True)
+    fake_self = SimpleNamespace(_concurrency_limiter=asyncio.Semaphore(2), get_llm=lambda *a: None)
+    q = SimpleNamespace(page_url="u", question_text="q")
+    out = asyncio.run(g.GigbotBot.run_research(fake_self, q))
+    assert out == "FREE RESEARCH BLOCK"
