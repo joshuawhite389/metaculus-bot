@@ -7,6 +7,10 @@ on:
         description: "Only check the Metaculus token and list open bot-testing-area questions (no LLM, nothing posted)"
         type: boolean
         default: false
+      coverage:
+        description: "Only report how many fall-futureeval + minibench questions this bot has forecast, and list missed ones (no LLM, nothing posted)"
+        type: boolean
+        default: false
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -57,7 +61,7 @@ jobs:
           restore-keys: gemini-usage-
       - name: Run bot
         run: |
-          poetry run python gigbot_bot.py --mode test_questions ${{ inputs.check_only && '--check-only' || '' }}
+          poetry run python gigbot_bot.py --mode test_questions ${{ inputs.check_only && '--check-only' || '' }} ${{ inputs.coverage && '--coverage' || '' }}
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:

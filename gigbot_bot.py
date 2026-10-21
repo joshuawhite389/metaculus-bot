@@ -57,6 +57,7 @@ from forecasting_tools import (
     structure_output,
 )
 
+import coverage
 import forecaster_core as core
 import gemini_budget
 import provider_keys
@@ -388,11 +389,21 @@ if __name__ == "__main__":
         action="store_true",
         help="only check the Metaculus token, list open bot-testing-area questions and report key readiness",
     )
+    parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="only report how many tournament questions this bot account has forecast, and list the missed ones",
+    )
     args = parser.parse_args()
 
     check_environment(strict=True)
     if args.check_only:
         raise SystemExit(check_only(MetaculusClient()))
+    if args.coverage:
+        # The bot went live on 2026-10-07 ~15:00Z; earlier questions can't count against it.
+        live_since = datetime.fromisoformat(_env("LIVE_SINCE", "2026-10-07T15:00:00+00:00"))
+        coverage.report(MetaculusClient(), [SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT], since=live_since)
+        raise SystemExit(0)
     blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
     if blockers:
         # Normal while waiting for the credits email: skip quietly instead of failing every 20 min.
