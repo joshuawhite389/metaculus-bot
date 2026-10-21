@@ -133,7 +133,12 @@ class GeminiLlm(GeneralLlm):
     consecutive_rate_limits = 0  # class-wide, across models
     _fallback: "GeminiLlm | None" = None  # the other Flash-Lite, tried once when this model is overloaded (503)
 
+    overloaded_until: dict = {}  # model -> monotonic time until which calls go straight to the fallback
+    OVERLOAD_COOLDOWN = 900.0
+
     async def invoke(self, prompt, system_prompt=None):  # type: ignore[override]
+        if self._fallback is not None and time.monotonic() < GeminiLlm.overloaded_until.get(self.model, 0.0):
+            return await self._fallback.invoke(prompt, system_prompt)
         GEMINI_BUDGET.take()
         waited = await gemini_budget.limiter_for(self.model).acquire()
         if waited > 1:
@@ -146,7 +151,11 @@ class GeminiLlm(GeneralLlm):
             msg = str(e)
             if self._fallback is not None and gemini_budget.is_overloaded_error(type(e).__name__, msg):
                 # 2026-10-21: gemini-3.1-flash-lite answered most calls with 503 "high demand" while 3.5 was fine.
-                logger.warning(f"{self.model} overloaded (503); retrying this call on {self._fallback.model}")
+                GeminiLlm.overloaded_until[self.model] = time.monotonic() + GeminiLlm.OVERLOAD_COOLDOWN
+                logger.warning(
+                    f"{self.model} overloaded (503); this call and the next {GeminiLlm.OVERLOAD_COOLDOWN / 60:.0f} min "
+                    f"of its calls go to {self._fallback.model}"
+                )
                 return await self._fallback.invoke(prompt, system_prompt)
             if "429" in msg or "RateLimit" in type(e).__name__ or "RESOURCE_EXHAUSTED" in msg:
                 GeminiLlm.consecutive_rate_limits += 1

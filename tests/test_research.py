@@ -205,8 +205,28 @@ def test_gemini_llm_falls_back_once_on_503(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(g.GeneralLlm, "invoke", fake_super_invoke)
+    monkeypatch.setattr(g.GeminiLlm, "overloaded_until", {})
     monkeypatch.setattr(g, "GEMINI_BUDGET", g.gemini_budget.Budget(cap=10, used_at_start=0, today="d"))
     llm = g.make_llm("gemini/gemini-3.1-flash-lite", temperature=0.1)
     assert asyncio.run(llm.invoke("p")) == "ok"
     assert calls == ["gemini/gemini-3.1-flash-lite", "gemini/gemini-3.5-flash-lite"]
     assert g.GEMINI_BUDGET.used_this_run == 2
+
+
+def test_overloaded_model_is_skipped_during_cooldown(monkeypatch):
+    calls = []
+
+    async def fake_super_invoke(self, prompt, system_prompt=None):
+        calls.append(self.model)
+        if self.model.endswith("3.1-flash-lite"):
+            raise RuntimeError("503 UNAVAILABLE")
+        return "ok"
+
+    monkeypatch.setattr(g.GeneralLlm, "invoke", fake_super_invoke)
+    monkeypatch.setattr(g.GeminiLlm, "overloaded_until", {})
+    monkeypatch.setattr(g, "GEMINI_BUDGET", g.gemini_budget.Budget(cap=10, used_at_start=0, today="d"))
+    llm = g.make_llm("gemini/gemini-3.1-flash-lite", temperature=0.1)
+    asyncio.run(llm.invoke("p"))
+    asyncio.run(llm.invoke("p"))
+    assert calls == ["gemini/gemini-3.1-flash-lite", "gemini/gemini-3.5-flash-lite", "gemini/gemini-3.5-flash-lite"]
+    assert g.GEMINI_BUDGET.used_this_run == 3

@@ -163,8 +163,8 @@ async def gdelt_headlines(query: str, timespan: str = "3w") -> str:
         try:
             r = await asyncio.to_thread(_get, GDELT_URL, params=params, timeout=30)
             # Their limiter is per IP and Actions runners share IPs (2026-10-21: ~half of first tries got 429).
-            # Questions stay open for hours, so waiting is cheap: two slower retries.
-            for backoff in (12, 30):
+            # Questions stay open for hours, so waiting is cheap: three slower retries.
+            for backoff in (15, 40, 90):
                 if r.status_code != 429:
                     break
                 await asyncio.sleep(backoff)

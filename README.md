@@ -45,6 +45,25 @@ What it changes (everything else is the template's):
   (variables `TOURNAMENT_ID`, `MINIBENCH_ID`), not the library's `CURRENT_AI_COMPETITION_ID`: the forecasting-tools
   version pinned in `poetry.lock` still pointed that constant at the closed Summer 2026 tournament (33022), so the
   template setup would have forecast nothing all season. `--check-only` lists both so a mismatch shows.
+- **Polling run** (2026-10-21): tournament questions are open for exactly 3 hours, but GitHub fired the "every 20 min"
+  cron only about every 4 hours, so coverage since 10-07 was 65% (fall-futureeval) and 39% (MiniBench). Each tournament
+  run now polls both tournaments every `POLL_EVERY` min (12) for `POLL_MINUTES` (300), retries a failed question on
+  the next pass (at most twice per run), records Gemini usage after every pass, and then starts its own successor with
+  `gh workflow run` (only after a run that lasted an hour or more, only on `main`; repository variable
+  `POLL_CHAIN=off` stops the chain). The cron stays as the backstop that restarts a broken chain; the concurrency
+  group keeps one run going. The repo is public, so the runner minutes are free.
+- **Free keyless research** (`research.py`, 2026-10-21; on whenever the paid web-research step is off, or force with
+  `FREE_RESEARCH=on|off`): one planner call (the parser model) turns the question into a news query, Wikipedia titles
+  and any BLS series ids; then GDELT DOC API headlines (one request per 6 s, three slower retries on 429), Wikipedia
+  lead sections, the resolution-source page linked in the criteria (fetched only if its robots.txt allows; reduced
+  to text, 3.5k chars: this is usually where the question's data series and latest value live) and BLS series
+  values. Every source is best effort; a failed planner falls back to a keyword query. Not used: FRED (bot
+  protection), stooq / Yahoo / Google News (robots.txt disallows).
+- **Gemini 503 fallback** (2026-10-21): when one Flash-Lite model answers 503 "high demand" (3.1 did for most calls
+  that day), the call is retried once on the other, and that model is skipped for the next 15 min.
+- **`--coverage`:** for both tournaments, how many questions opened since the bot went live it has forecast, the
+  open-window lengths, every missed question, and the leaderboard rank when one exists. In Actions:
+  `Test Bot → Run workflow → coverage`.
 - **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions and reports
   key readiness, with no LLM call and nothing posted. In Actions: `Test Bot → Run workflow → check_only`.
 - **Workflows:** a cached venv (faster, fewer Actions minutes); the Metaculus Cup workflow is manual-only.
