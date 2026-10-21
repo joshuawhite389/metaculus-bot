@@ -71,6 +71,12 @@ def is_daily_quota_error(message: str) -> bool:
     return "perday" in m or "per day" in m or "daily" in m or "rpd" in m
 
 
+def is_overloaded_error(exc_name: str, message: str) -> bool:
+    """A 503 / UNAVAILABLE ("model is experiencing high demand"): the model is busy, not our quota."""
+    m = message.lower()
+    return "ServiceUnavailable" in exc_name or "503" in message or "unavailable" in m or "high demand" in m
+
+
 class Budget:
     def __init__(self, cap: int, used_at_start: int, today: str):
         self.cap = int(cap)

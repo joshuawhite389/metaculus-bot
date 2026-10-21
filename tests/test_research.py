@@ -181,3 +181,32 @@ def test_bot_run_research_uses_free_research(monkeypatch):
     q = SimpleNamespace(page_url="u", question_text="q")
     out = asyncio.run(g.GigbotBot.run_research(fake_self, q))
     assert out == "FREE RESEARCH BLOCK"
+
+
+def test_source_urls_keeps_balanced_parentheses_and_drops_markdown_closers():
+    text = r"See [EC](https://en.wikipedia.org/wiki/Electoral_College_\(United_States\)) and (https://a.org/x)."
+    assert r.source_urls(text) == ["https://en.wikipedia.org/wiki/Electoral_College_(United_States)", "https://a.org/x"]
+
+
+def test_overloaded_error_detection():
+    import gemini_budget as gb
+    assert gb.is_overloaded_error("ServiceUnavailableError", "")
+    assert gb.is_overloaded_error("X", '{"code": 503, "message": "This model is currently experiencing high demand"}')
+    assert not gb.is_overloaded_error("RateLimitError", "429 RESOURCE_EXHAUSTED")
+
+
+def test_gemini_llm_falls_back_once_on_503(monkeypatch):
+    calls = []
+
+    async def fake_super_invoke(self, prompt, system_prompt=None):
+        calls.append(self.model)
+        if self.model.endswith("3.1-flash-lite"):
+            raise RuntimeError('{"code": 503, "status": "UNAVAILABLE"}')
+        return "ok"
+
+    monkeypatch.setattr(g.GeneralLlm, "invoke", fake_super_invoke)
+    monkeypatch.setattr(g, "GEMINI_BUDGET", g.gemini_budget.Budget(cap=10, used_at_start=0, today="d"))
+    llm = g.make_llm("gemini/gemini-3.1-flash-lite", temperature=0.1)
+    assert asyncio.run(llm.invoke("p")) == "ok"
+    assert calls == ["gemini/gemini-3.1-flash-lite", "gemini/gemini-3.5-flash-lite"]
+    assert g.GEMINI_BUDGET.used_this_run == 2

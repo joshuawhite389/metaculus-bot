@@ -131,6 +131,7 @@ class GeminiLlm(GeneralLlm):
     """
 
     consecutive_rate_limits = 0  # class-wide, across models
+    _fallback: "GeminiLlm | None" = None  # the other Flash-Lite, tried once when this model is overloaded (503)
 
     async def invoke(self, prompt, system_prompt=None):  # type: ignore[override]
         GEMINI_BUDGET.take()
@@ -143,6 +144,10 @@ class GeminiLlm(GeneralLlm):
             return result
         except Exception as e:
             msg = str(e)
+            if self._fallback is not None and gemini_budget.is_overloaded_error(type(e).__name__, msg):
+                # 2026-10-21: gemini-3.1-flash-lite answered most calls with 503 "high demand" while 3.5 was fine.
+                logger.warning(f"{self.model} overloaded (503); retrying this call on {self._fallback.model}")
+                return await self._fallback.invoke(prompt, system_prompt)
             if "429" in msg or "RateLimit" in type(e).__name__ or "RESOURCE_EXHAUSTED" in msg:
                 GeminiLlm.consecutive_rate_limits += 1
                 if gemini_budget.is_daily_quota_error(msg):
@@ -158,9 +163,21 @@ class GeminiLlm(GeneralLlm):
             raise
 
 
+# When one free Flash-Lite model is overloaded (503), the call moves to the other one.
+GEMINI_FALLBACK = {
+    "gemini/gemini-3.1-flash-lite": "gemini/gemini-3.5-flash-lite",
+    "gemini/gemini-3.5-flash-lite": "gemini/gemini-3.1-flash-lite",
+}
+
+
 def make_llm(model: str, **kwargs) -> GeneralLlm:
-    cls = GeminiLlm if model.startswith("gemini/") else GeneralLlm
-    return cls(model=model, **kwargs)
+    if not model.startswith("gemini/"):
+        return GeneralLlm(model=model, **kwargs)
+    llm = GeminiLlm(model=model, **kwargs)
+    alt = GEMINI_FALLBACK.get(model)
+    if alt:
+        llm._fallback = GeminiLlm(model=alt, **kwargs)  # no fallback of its own: at most one extra call
+    return llm
 
 # Credit guard, in US dollars of OpenRouter credit.
 STOP_BELOW = float(_env("CREDIT_STOP_BELOW", "3"))

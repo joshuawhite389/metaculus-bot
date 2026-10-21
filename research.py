@@ -162,8 +162,12 @@ async def gdelt_headlines(query: str, timespan: str = "3w") -> str:
             await asyncio.sleep(wait)
         try:
             r = await asyncio.to_thread(_get, GDELT_URL, params=params, timeout=30)
-            if r.status_code == 429:  # their limiter is per IP, and Actions runners share IPs: one slower retry
-                await asyncio.sleep(GDELT_MIN_GAP * 2)
+            # Their limiter is per IP and Actions runners share IPs (2026-10-21: ~half of first tries got 429).
+            # Questions stay open for hours, so waiting is cheap: two slower retries.
+            for backoff in (12, 30):
+                if r.status_code != 429:
+                    break
+                await asyncio.sleep(backoff)
                 r = await asyncio.to_thread(_get, GDELT_URL, params=params, timeout=30)
         finally:
             _gdelt_last = time.monotonic()
@@ -231,14 +235,16 @@ def html_to_text(html: str) -> str:
     return "\n".join(ln for ln in lines if len(ln) > 1)
 
 
-_URL_RE = re.compile(r"https?://[^\s)\]>\"'<]+")
+_URL_RE = re.compile(r"https?://[^\s\]>\"'<]+")
 
 
 def source_urls(*texts: str) -> list[str]:
     seen, out = set(), []
     for t in texts:
         for u in _URL_RE.findall(t or ""):
-            u = u.rstrip(".,;:")
+            u = u.replace("\\", "")  # markdown-escaped parentheses arrive as \( \)
+            while u and (u[-1] in ".,;:" or (u[-1] == ")" and u.count(")") > u.count("("))):
+                u = u[:-1]  # trailing punctuation, or the ")" closing a markdown link / a sentence
             host = urlparse(u).netloc.lower()
             if not host or any(host == h or host.endswith("." + h) for h in SKIP_HOSTS):
                 continue
