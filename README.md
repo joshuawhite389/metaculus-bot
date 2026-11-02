@@ -61,10 +61,24 @@ What it changes (everything else is the template's):
   protection), stooq / Yahoo / Google News (robots.txt disallows).
 - **Gemini 503 fallback** (2026-10-21): when one Flash-Lite model answers 503 "high demand" (3.1 did for most calls
   that day), the call is retried once on the other, and that model is skipped for the next 15 min.
+- **Market Pulse 26Q4** (2026-11-02; $7.5k, bots eligible): polled after FutureEval and MiniBench in every pass
+  (`MARKET_PULSE_ID`, default `market-pulse-26q4`; `off` drops it). Its questions are numeric and discrete groups
+  (unpacked into subquestions; each period's subquestion closes when the period starts) and are scored over their
+  whole life, so a question is re-forecast once its last forecast is `REFORECAST_HOURS` (48) old. In Gemini mode it
+  only spends while more than `MARKET_PULSE_RESERVE` (150) calls are left today, about 8 calls per question, stalest
+  first, so the 3-hour FutureEval/MiniBench windows keep their budget. A group member gets a note to forecast that
+  member alone.
+- **Numeric/discrete parsing** (2026-11-02): the final "Percentile 10..90" block is read by regex (as binary reads
+  "Probability: NN%"), saving the parser calls (dry run: ~4 calls a question instead of ~9). The template's parser LLM
+  is the fallback when the block isn't clean (unit words, wrong order) or its median is far outside the question's
+  range.
+- **`--questions post:question,...`** (Test Bot input `questions`): dry-runs chosen **closed or resolved** questions
+  and refuses open ones, to test a question type without touching live questions.
 - **`--coverage`:** for both tournaments, how many questions opened since the bot went live it has forecast, the
   open-window lengths, every missed question, and the leaderboard rank when one exists. In Actions:
   `Test Bot → Run workflow → coverage`.
-- **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions and reports
+- **`--check-only`:** proves `METACULUS_TOKEN` authenticates, lists the open bot-testing-area questions, every Market
+  Pulse subquestion (state, type, window, range, unit, last forecast) and reports
   key readiness, with no LLM call and nothing posted. In Actions: `Test Bot → Run workflow → check_only`.
 - **Workflows:** a cached venv (faster, fewer Actions minutes); the Metaculus Cup workflow is manual-only.
 - Model names can be changed without code edits through repository **variables** `FORECASTER_MODELS`,
