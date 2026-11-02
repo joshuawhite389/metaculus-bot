@@ -150,6 +150,41 @@ def parse_probability(text: str) -> float | None:
     return value
 
 
+_PCT_RE = re.compile(
+    r"Percentile\s*(10|20|40|60|80|90)\s*\**\s*[:=]\s*\**\s*(-?)\s*\$?\s*(-?[\d,]*\.?\d+)[ \t]*([^\n]*)", re.IGNORECASE
+)
+_PCT_ORDER = ["10", "20", "40", "60", "80", "90"]
+
+
+def parse_percentiles(text: str, unit: str | None = None) -> list[tuple[float, float]] | None:
+    """The last "Percentile 10..90: value" block as [(0.1, v), ...], or None when it isn't clean enough to trust
+    without the parser LLM: six percentiles in order, strictly increasing, and nothing after a number except "$",
+    "%" or the question's own unit (so "1.2 billion" or "5e6" go to the LLM, which converts units)."""
+    matches = list(_PCT_RE.finditer(text or ""))
+    starts = [i for i, m in enumerate(matches) if m.group(1) == "10"]
+    if not starts:
+        return None
+    block = matches[starts[-1]:starts[-1] + 6]
+    if [m.group(1) for m in block] != _PCT_ORDER:
+        return None
+    unit_l = (unit or "").strip().lower()
+    out = []
+    for m in block:
+        tail = re.sub(r"\(.*?\)", "", m.group(4)).strip().strip("*`\"'").strip().lower()
+        if tail and tail not in ("$", "%", "usd") and not (unit_l and (tail == unit_l or tail in unit_l)):
+            return None
+        try:
+            v = float(m.group(3).replace(",", ""))
+        except ValueError:
+            return None
+        if m.group(2) == "-":
+            v = -v
+        out.append((int(m.group(1)) / 100, v))
+    if any(b[1] <= a[1] for a, b in zip(out, out[1:])):
+        return None
+    return out
+
+
 ######################################## AGGREGATION ########################################
 
 

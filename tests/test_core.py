@@ -46,3 +46,30 @@ def test_scores():
     assert abs(core.brier(0.7, 1) - 0.09) < 1e-12
     assert core.log_score(0.5, 0) < 0
     assert core.log_score(0.9, 1) > core.log_score(0.6, 1)
+
+
+def test_parse_percentiles_takes_the_last_clean_block():
+    text = """AMD: Percentile 10: 0.5
+Percentile 20: 0.6
+Percentile 40: 0.7
+Percentile 60: 0.8
+Percentile 80: 0.9
+Percentile 90: 1.0
+Final answer:
+Percentile 10: -0.15
+Percentile 20: 0.02 $
+Percentile 40: 1,200.5
+Percentile 60: 1,300 (median-ish)
+**Percentile 80:** 1400
+Percentile 90: 1500 USD
+"""
+    assert core.parse_percentiles(text) == [(0.1, -0.15), (0.2, 0.02), (0.4, 1200.5), (0.6, 1300.0), (0.8, 1400.0), (0.9, 1500.0)]
+
+
+def test_parse_percentiles_refuses_unit_words_and_bad_order():
+    base = "Percentile 10: 1\nPercentile 20: 2\nPercentile 40: 3\nPercentile 60: 4\nPercentile 80: 5\nPercentile 90: {}\n"
+    assert core.parse_percentiles(base.format("6 billion")) is None
+    assert core.parse_percentiles(base.format("6 bps"), unit="bps") is not None
+    assert core.parse_percentiles(base.format("3")) is None  # not increasing
+    assert core.parse_percentiles("Percentile 10: 1\nPercentile 20: 2") is None
+    assert core.parse_percentiles("no numbers here") is None

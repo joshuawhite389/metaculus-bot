@@ -52,6 +52,9 @@ from forecasting_tools import (
     GeneralLlm,
     MetaculusClient,
     MetaculusQuestion,
+    NumericDistribution,
+    NumericQuestion,
+    Percentile,
     PredictionTypes,
     ReasonedPrediction,
     clean_indents,
@@ -304,6 +307,20 @@ class GigbotBot(FallTemplateBot2026):
         logger.info(f"Forecasted URL {question.page_url} with prediction: {prob}.")
         return ReasonedPrediction(prediction_value=prob, reasoning=reasoning)
 
+    async def _numeric_prompt_to_forecast(self, question: NumericQuestion, prompt: str):  # type: ignore[override]
+        """Read the final "Percentile N: value" block directly (as binary reads "Probability: NN%"); only when it
+        isn't clean do we fall back to the template, which asks the forecaster again and parses with the LLM."""
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        parsed = core.parse_percentiles(reasoning, question.unit_of_measure)
+        if parsed is None:
+            logger.warning(f"No clean percentile block for {question.page_url}; falling back to the template parser")
+            return await super()._numeric_prompt_to_forecast(question, prompt)
+        percentiles = [Percentile(percentile=p, value=v) for p, v in parsed]
+        prediction = NumericDistribution.from_question(percentiles, question)
+        logger.info(f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}.")
+        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+
     async def _aggregate_predictions(
         self, predictions: list[PredictionTypes], question: MetaculusQuestion
     ) -> PredictionTypes:
@@ -407,8 +424,13 @@ def label_subquestion(q: MetaculusQuestion) -> MetaculusQuestion:
     """A numeric group's subquestions can share the group's title; put the option label in the question text so
     the prompts and the research planner know which member of the group is being forecast."""
     label = (getattr(q, "group_question_option", None) or "").strip()
-    if label and label.lower() not in (q.question_text or "").lower():
+    if not label:
+        return q
+    if label.lower() not in (q.question_text or "").lower():
         q.question_text = f"{q.question_text} [{label}]"
+    note = f'This question is only about "{label}". Forecast it alone and give one final answer, not one per member of the group.'
+    if note not in (q.fine_print or ""):
+        q.fine_print = f"{q.fine_print or ''}\n\n{note}".strip()
     return q
 
 
