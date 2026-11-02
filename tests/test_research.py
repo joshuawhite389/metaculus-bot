@@ -140,8 +140,43 @@ class FakeBot:
         return out
 
 
-def Q(i, done=False):
-    return SimpleNamespace(id_of_question=i, already_forecasted=done)
+def Q(i, done=False, last=None):
+    return SimpleNamespace(id_of_question=i, already_forecasted=done, timestamp_of_my_last_forecast=last)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _two_tournaments(monkeypatch, request):
+    """FakeClient counts two lookups per pass; Market Pulse has its own test below."""
+    if "market_pulse" not in request.node.name:
+        monkeypatch.setattr(g, "MARKET_PULSE_ON", False)
+
+
+def test_poll_market_pulse_new_and_stale_only(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setattr(g, "MODE", "openrouter")
+    monkeypatch.setattr(g, "MARKET_PULSE_ON", True)
+    now = datetime.now(timezone.utc)
+    fresh, stale = Q(21, True, now - timedelta(hours=2)), Q(22, True, now - timedelta(hours=g.REFORECAST_HOURS + 1))
+    client = FakeClient([{g.MARKET_PULSE_TOURNAMENT: [Q(20), fresh, stale]}])
+    bot = FakeBot(client)
+    asyncio.run(g.poll_tournaments(bot, minutes=0, every=12))
+    assert bot.forecast == [20, 22]
+
+
+def test_poll_market_pulse_keeps_the_gemini_reserve(monkeypatch):
+    monkeypatch.setattr(g, "MODE", "gemini")
+    monkeypatch.setattr(g, "MARKET_PULSE_ON", True)
+    monkeypatch.setattr(g, "checkpoint_gemini_usage", lambda: None)
+    monkeypatch.setattr(g.GEMINI_BUDGET, "cap", 300)
+    monkeypatch.setattr(g.GEMINI_BUDGET, "used_at_start", 300 - g.MARKET_PULSE_RESERVE - 17)  # room for 2 questions
+    monkeypatch.setattr(g.GEMINI_BUDGET, "used_this_run", 0)
+    client = FakeClient([{g.MINIBENCH_TOURNAMENT: [], g.MARKET_PULSE_TOURNAMENT: [Q(30), Q(31), Q(32)]}])
+    bot = FakeBot(client)
+    asyncio.run(g.poll_tournaments(bot, minutes=0, every=12))
+    assert bot.forecast == [30, 31]
 
 
 def test_poll_single_pass_forecasts_both_tournaments(monkeypatch):

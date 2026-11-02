@@ -17,11 +17,13 @@ from forecasting_tools.helpers.metaculus_client import ApiFilter
 logger = logging.getLogger(__name__)
 
 
-def all_questions(client: MetaculusClient, tournament: str | int) -> list:
+def all_questions(
+    client: MetaculusClient, tournament: str | int, statuses: tuple = ("open", "closed", "resolved")
+) -> list:
     """Every question in the tournament, groups unpacked, paging through the API (100 per page)."""
     api_filter = ApiFilter(
         allowed_tournaments=[tournament],
-        allowed_statuses=["open", "closed", "resolved"],
+        allowed_statuses=list(statuses),
         group_question_mode="unpack_subquestions",
         order_by="-open_time",
     )

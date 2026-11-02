@@ -39,7 +39,7 @@ import itertools
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -118,6 +118,15 @@ USE_FREE_RESEARCH = FREE_RESEARCH == "on" or (FREE_RESEARCH == "auto" and NO_RES
 # silently forecast nothing all season. Override with the TOURNAMENT_ID variable when the season changes.
 SEASONAL_TOURNAMENT = _env("TOURNAMENT_ID", "fall-futureeval-2026")
 MINIBENCH_TOURNAMENT = _env("MINIBENCH_ID", "minibench")
+# Market Pulse 26Q4 (2026-11-02): $7.5k, bots eligible, rounds Nov 9-20 and Nov 23-Dec 4. Its questions (numeric
+# groups among them) stay open for days and are scored over their whole life, so the bot re-forecasts each one when
+# its last forecast is older than REFORECAST_HOURS. The empty value or "off" leaves it out.
+MARKET_PULSE_TOURNAMENT = _env("MARKET_PULSE_ID", "market-pulse-26q4")
+MARKET_PULSE_ON = MARKET_PULSE_TOURNAMENT.strip().lower() not in ("off", "none")
+REFORECAST_HOURS = float(_env("REFORECAST_HOURS", "48"))
+# Market Pulse only spends Gemini calls while more than this many remain today, so the 3-hour FutureEval/MiniBench
+# windows always have budget left.
+MARKET_PULSE_RESERVE = int(_env("MARKET_PULSE_RESERVE", "120"))
 
 # One shared Gemini budget per process (see gemini_budget.py). Only consulted by GeminiLlm.
 GEMINI_BUDGET = gemini_budget.budget_from_env()
@@ -330,6 +339,27 @@ Keep it under 500 words.
 ALL_MODELS = FORECASTER_MODELS + ([] if NO_RESEARCH else [RESEARCHER_MODEL]) + [PARSER_MODEL]
 
 
+def list_tournament(client: MetaculusClient, tournament: str) -> None:
+    """Every upcoming/open/closed question in a tournament with its type, group label and window. Read-only."""
+    try:
+        qs = coverage.all_questions(client, tournament, statuses=("upcoming", "open", "closed"))
+    except Exception as e:
+        print(f"ℹ️   Tournament {tournament!r}: lookup failed: {type(e).__name__}: {str(e)[:160]}")
+        return
+    print(f"ℹ️   Tournament {tournament!r}: {len(qs)} upcoming/open/closed question(s)")
+    def t(d):
+        return f"{d:%m-%d %H:%MZ}" if d else "-"
+
+    for q in qs:
+        state = q.state.value if q.state else "?"
+        last = q.timestamp_of_my_last_forecast if q.already_forecasted else None
+        print(
+            f"    • {q.page_url} q{q.id_of_question} {state} {type(q).__name__} label={q.group_question_option!r} "
+            f"open={t(q.open_time)} close={t(q.close_time)} last={t(last)}"
+        )
+        print(f"      {q.question_text[:150]}")
+
+
 def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") -> int:
     """Prove the Metaculus token works and show what the bot would see. Exit code: 0 ok, 1 not."""
     try:
@@ -361,6 +391,8 @@ def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") ->
             print(f"ℹ️   Tournament {tid!r}: {len(qs)} open question(s), {done} already forecast by this bot")
         except Exception as e:
             print(f"ℹ️   Tournament {tid!r}: lookup failed: {type(e).__name__}: {str(e)[:120]}")
+    if MARKET_PULSE_ON:
+        list_tournament(client, MARKET_PULSE_TOURNAMENT)
     blockers = provider_keys.run_blockers(ALL_MODELS, os.environ)
     if blockers:
         print("⏸️   LLM keys: not ready, the bot would skip this run because:")
@@ -369,6 +401,37 @@ def check_only(client: MetaculusClient, tournament: str = "bot-testing-area") ->
     else:
         print(f"✅  LLM keys: ready for {', '.join(ALL_MODELS)}")
     return 0
+
+
+def label_subquestion(q: MetaculusQuestion) -> MetaculusQuestion:
+    """A numeric group's subquestions can share the group's title; put the option label in the question text so
+    the prompts and the research planner know which member of the group is being forecast."""
+    label = (getattr(q, "group_question_option", None) or "").strip()
+    if label and label.lower() not in (q.question_text or "").lower():
+        q.question_text = f"{q.question_text} [{label}]"
+    return q
+
+
+def needs_forecast(q: MetaculusQuestion, reforecast_hours: float | None, now: datetime | None = None) -> bool:
+    """Never forecast: yes. Forecast before: only when re-forecasting is on and the last one is older than
+    `reforecast_hours` (Market Pulse scores a forecast over the question's whole life)."""
+    if not q.already_forecasted:
+        return True
+    if reforecast_hours is None:
+        return False
+    last = q.timestamp_of_my_last_forecast
+    if last is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - last).total_seconds() >= reforecast_hours * 3600
+
+
+def poll_targets() -> list[tuple[str, float | None]]:
+    """(tournament, re-forecast hours or None) in priority order: the 3-hour-window tournaments first."""
+    targets: list[tuple[str, float | None]] = [(SEASONAL_TOURNAMENT, None), (MINIBENCH_TOURNAMENT, None)]
+    if MARKET_PULSE_ON:
+        targets.append((MARKET_PULSE_TOURNAMENT, REFORECAST_HOURS))
+    return targets
 
 
 def build_bot(publish: bool, predictions: int) -> GigbotBot:
@@ -434,16 +497,28 @@ async def poll_tournaments(bot: GigbotBot, minutes: float, every: float) -> list
         if MODE == "gemini" and GEMINI_BUDGET.remaining <= 0:
             logger.info(f"Pass {passes}: Gemini cap reached for {GEMINI_BUDGET.today}; only waiting")
         else:
-            for tournament in (SEASONAL_TOURNAMENT, MINIBENCH_TOURNAMENT):
+            for tournament, reforecast_hours in poll_targets():
+                if (
+                    reforecast_hours is not None
+                    and MODE == "gemini"
+                    and GEMINI_BUDGET.remaining <= MARKET_PULSE_RESERVE
+                ):
+                    logger.info(f"Pass {passes}: {tournament} skipped, Gemini calls left today are within the reserve")
+                    continue
                 try:
                     questions = bot.metaculus_client.get_all_open_questions_from_tournament(tournament)
                 except Exception as e:
                     logger.warning(f"Pass {passes}: could not list {tournament}: {type(e).__name__}: {str(e)[:160]}")
                     continue
                 todo = [
-                    q for q in questions
-                    if not q.already_forecasted and failures.get(q.id_of_question, 0) < MAX_FAILURES_PER_QUESTION
+                    label_subquestion(q) for q in questions
+                    if needs_forecast(q, reforecast_hours) and failures.get(q.id_of_question, 0) < MAX_FAILURES_PER_QUESTION
                 ]
+                if reforecast_hours is not None and MODE == "gemini":
+                    # Up to ~8 calls a numeric question (planner, 3 forecasts, 3 parses, retries); stay above the reserve.
+                    room = max(0, (GEMINI_BUDGET.remaining - MARKET_PULSE_RESERVE) // 8)
+                    todo.sort(key=lambda q: (q.already_forecasted, q.timestamp_of_my_last_forecast or datetime.min.replace(tzinfo=timezone.utc)))
+                    todo = todo[:room]
                 if not todo:
                     continue
                 logger.info(f"Pass {passes}: {len(todo)} question(s) to forecast in {tournament}")
@@ -463,6 +538,8 @@ async def poll_tournaments(bot: GigbotBot, minutes: float, every: float) -> list
 
 def _run(bot: GigbotBot, client: MetaculusClient, mode: str, poll_minutes: float = 0, poll_every: float = 12) -> list:
     if mode == "tournament":
+        # poll_tournaments chooses the questions itself (new ones, and stale Market Pulse ones to re-forecast).
+        bot.skip_previously_forecasted_questions = False
         return asyncio.run(poll_tournaments(bot, poll_minutes, poll_every))
     if mode == "metaculus_cup":
         bot.skip_previously_forecasted_questions = False
