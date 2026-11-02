@@ -536,6 +536,24 @@ async def poll_tournaments(bot: GigbotBot, minutes: float, every: float) -> list
     return reports
 
 
+def closed_questions(client: MetaculusClient, spec: str) -> list:
+    """Questions for a dry run, from "post:question,post:question" (":question" picks one subquestion of a group).
+    Open and upcoming questions are refused: nobody tests on, or peeks at, a live tournament question."""
+    out = []
+    for item in [x.strip() for x in spec.split(",") if x.strip()]:
+        post, _, qid = item.partition(":")
+        qs = client.get_question_by_post_id(int(post), group_question_mode="unpack_subquestions")
+        qs = qs if isinstance(qs, list) else [qs]
+        for q in qs:
+            if qid and q.id_of_question != int(qid):
+                continue
+            state = q.state.value if q.state else "?"
+            if state not in ("closed", "resolved"):
+                raise SystemExit(f"Refusing {q.page_url} q{q.id_of_question}: it is {state}, only closed/resolved questions may be tested")
+            out.append(label_subquestion(q))
+    return out
+
+
 def _run(bot: GigbotBot, client: MetaculusClient, mode: str, poll_minutes: float = 0, poll_every: float = 12) -> list:
     if mode == "tournament":
         # poll_tournaments chooses the questions itself (new ones, and stale Market Pulse ones to re-forecast).
@@ -545,7 +563,12 @@ def _run(bot: GigbotBot, client: MetaculusClient, mode: str, poll_minutes: float
         bot.skip_previously_forecasted_questions = False
         return asyncio.run(bot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True))
     bot.skip_previously_forecasted_questions = False
+    if QUESTIONS_SPEC:
+        return asyncio.run(bot.forecast_questions(closed_questions(client, QUESTIONS_SPEC), return_exceptions=True))
     return asyncio.run(bot.forecast_on_tournament("bot-testing-area", return_exceptions=True))
+
+
+QUESTIONS_SPEC = ""
 
 
 if __name__ == "__main__":
@@ -570,6 +593,11 @@ if __name__ == "__main__":
         type=float,
         default=float(_env("POLL_MINUTES", "0")),
         help="tournament mode: keep polling for new questions this long (0 = one pass)",
+    )
+    parser.add_argument(
+        "--questions",
+        default="",
+        help='test_questions mode: dry-run these closed/resolved questions instead ("post:question,..."); implies --dry-run',
     )
     parser.add_argument("--poll-every", type=float, default=float(_env("POLL_EVERY", "12")), help="minutes between passes")
     args = parser.parse_args()
@@ -605,7 +633,8 @@ if __name__ == "__main__":
             predictions = min(predictions, 3)
             logger.warning(f"Credit low (${credit:.2f}): using {predictions} predictions per question.")
 
-    publish = not args.dry_run
+    QUESTIONS_SPEC = args.questions
+    publish = not (args.dry_run or args.questions)
     print_startup_banner(args.mode, will_publish=publish)
     print(f"Tournaments: {SEASONAL_TOURNAMENT} + {MINIBENCH_TOURNAMENT}")
     print(f"Provider mode: {MODE}; forecasters {FORECASTER_MODELS}; researcher {RESEARCHER_MODEL}; parser {PARSER_MODEL}; {predictions} predictions/question")

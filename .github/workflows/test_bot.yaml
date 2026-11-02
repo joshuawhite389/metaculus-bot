@@ -7,6 +7,10 @@ on:
         description: "Only check the Metaculus token and list open bot-testing-area questions (no LLM, nothing posted)"
         type: boolean
         default: false
+      questions:
+        description: "Dry-run these closed/resolved questions instead (post:question,...), nothing posted"
+        type: string
+        default: ""
       coverage:
         description: "Only report how many fall-futureeval + minibench questions this bot has forecast, and list missed ones (no LLM, nothing posted)"
         type: boolean
@@ -61,10 +65,11 @@ jobs:
           restore-keys: gemini-usage-
       - name: Run bot
         run: |
-          poetry run python gigbot_bot.py --mode test_questions ${{ inputs.check_only && '--check-only' || '' }} ${{ inputs.coverage && '--coverage' || '' }}
+          poetry run python gigbot_bot.py --mode test_questions ${{ inputs.check_only && '--check-only' || '' }} ${{ inputs.coverage && '--coverage' || '' }} ${QUESTIONS:+--questions "$QUESTIONS"}
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
+          QUESTIONS: ${{ inputs.questions }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
