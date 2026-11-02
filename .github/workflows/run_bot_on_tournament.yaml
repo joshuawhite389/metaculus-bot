@@ -84,6 +84,9 @@ jobs:
           FREE_RESEARCH: ${{ vars.FREE_RESEARCH }}
           POLL_MINUTES: ${{ vars.POLL_MINUTES }}
           POLL_EVERY: ${{ vars.POLL_EVERY }}
+          MARKET_PULSE_ID: ${{ vars.MARKET_PULSE_ID }}
+          REFORECAST_HOURS: ${{ vars.REFORECAST_HOURS }}
+          MARKET_PULSE_RESERVE: ${{ vars.MARKET_PULSE_RESERVE }}
       - name: Save Gemini usage counter
         if: always() && hashFiles('.gemini-usage/usage.json') != ''
         uses: actions/cache/save@v4

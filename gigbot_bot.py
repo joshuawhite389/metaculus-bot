@@ -129,7 +129,7 @@ MARKET_PULSE_ON = MARKET_PULSE_TOURNAMENT.strip().lower() not in ("off", "none")
 REFORECAST_HOURS = float(_env("REFORECAST_HOURS", "48"))
 # Market Pulse only spends Gemini calls while more than this many remain today, so the 3-hour FutureEval/MiniBench
 # windows always have budget left.
-MARKET_PULSE_RESERVE = int(_env("MARKET_PULSE_RESERVE", "120"))
+MARKET_PULSE_RESERVE = int(_env("MARKET_PULSE_RESERVE", "150"))
 
 # One shared Gemini budget per process (see gemini_budget.py). Only consulted by GeminiLlm.
 GEMINI_BUDGET = gemini_budget.budget_from_env()
