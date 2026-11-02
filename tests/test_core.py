@@ -73,3 +73,10 @@ def test_parse_percentiles_refuses_unit_words_and_bad_order():
     assert core.parse_percentiles(base.format("3")) is None  # not increasing
     assert core.parse_percentiles("Percentile 10: 1\nPercentile 20: 2") is None
     assert core.parse_percentiles("no numbers here") is None
+
+
+def test_plausible_scale_catches_unit_mismatch():
+    pcts = [(0.1, 89e9), (0.2, 90e9), (0.4, 91e9), (0.6, 92e9), (0.8, 93e9), (0.9, 94e9)]
+    assert not core.plausible_scale(pcts, 60, 120)  # question asked in billions
+    assert core.plausible_scale(pcts, 60e9, 120e9)
+    assert core.plausible_scale([(0.1, -9), (0.2, -5), (0.4, -1), (0.6, 1), (0.8, 5), (0.9, 9)], -20, 20)

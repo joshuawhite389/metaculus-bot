@@ -185,6 +185,14 @@ def parse_percentiles(text: str, unit: str | None = None) -> list[tuple[float, f
     return out
 
 
+def plausible_scale(percentiles: list[tuple[float, float]], lower: float, upper: float) -> bool:
+    """False when the median is more than two ranges outside [lower, upper]: almost surely the wrong units
+    (e.g. 91000000000 for a question asked in billions), which the parser LLM is better at converting."""
+    span = abs(upper - lower) or 1.0
+    median = percentiles[len(percentiles) // 2][1]
+    return lower - 2 * span <= median <= upper + 2 * span
+
+
 ######################################## AGGREGATION ########################################
 
 

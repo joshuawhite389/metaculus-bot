@@ -313,6 +313,9 @@ class GigbotBot(FallTemplateBot2026):
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsed = core.parse_percentiles(reasoning, question.unit_of_measure)
+        if parsed is not None and not core.plausible_scale(parsed, question.lower_bound, question.upper_bound):
+            logger.warning(f"Percentiles for {question.page_url} are far outside its range (units?): {parsed}")
+            parsed = None
         if parsed is None:
             logger.warning(f"No clean percentile block for {question.page_url}; falling back to the template parser")
             return await super()._numeric_prompt_to_forecast(question, prompt)
@@ -372,7 +375,8 @@ def list_tournament(client: MetaculusClient, tournament: str) -> None:
         last = q.timestamp_of_my_last_forecast if q.already_forecasted else None
         print(
             f"    • {q.page_url} q{q.id_of_question} {state} {type(q).__name__} label={q.group_question_option!r} "
-            f"open={t(q.open_time)} close={t(q.close_time)} last={t(last)}"
+            f"open={t(q.open_time)} close={t(q.close_time)} last={t(last)} "
+            f"range=[{getattr(q, 'lower_bound', '')}, {getattr(q, 'upper_bound', '')}] unit={getattr(q, 'unit_of_measure', '')!r}"
         )
         print(f"      {q.question_text[:150]}")
 
